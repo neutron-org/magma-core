@@ -1016,17 +1016,31 @@ pub mod test {
         let out_of_proportion_deposit0 = vault_mockup.deposit(100_000, 0, &pool_mockup.user2);
         let out_of_proportion_deposit1 = vault_mockup.deposit(0, 100_000, &pool_mockup.user2);
         // TODO: How do I distinguish between expected (ContractError) and unexpected
-        //       (RuntimeError, panics, ...) from the test? Eg, those 2 below only because
-        //       the broken invariant produce an `RuntimeError` after the panic.
+        //       (RuntimeError, panics, ...) from this test? Eg, those 2 assertions below
+        //       only work because the broken invariant produce a `RuntimeError` after the panic.
         assert!(out_of_proportion_deposit0.is_err());
         assert!(out_of_proportion_deposit1.is_err());
-
-        // vault_mockup.deposit(100_000, 1, &pool_mockup.user2).unwrap();
-        // vault_mockup.deposit(1, 100_000, &pool_mockup.user2).unwrap();
 
         pool_mockup.swap_usdc_for_osmo(&pool_mockup.user1, 100_000_000).unwrap();
         vault_mockup.deposit(100_000, 0, &pool_mockup.user2).unwrap();
         assert!(vault_mockup.deposit(0, 100_000, &pool_mockup.user2).is_err());
+    }
+
+
+    #[test]
+    fn limit_vault_with_non_limit_deposit() {
+        let pool_mockup = PoolMockup::new(1_000_000_000, 90_123_456_789_000);
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("1.12", "1.08", "0"));
+
+        vault_mockup.deposit(100_000, 0, &pool_mockup.user2).unwrap();
+        vault_mockup.deposit(100_000, 10_000, &pool_mockup.user1).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+
+        vault_mockup.deposit(10_000, 1000, &pool_mockup.user2).unwrap();
+        assert!(vault_mockup.deposit(0, 1000, &pool_mockup.user2).is_err());
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        let bals = vault_mockup.vault_balances_query();
+        assert!(bals.bal1.is_zero() && !bals.bal0.is_zero());
     }
 
 

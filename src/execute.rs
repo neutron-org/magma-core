@@ -97,6 +97,19 @@ pub fn deposit(
         })
     }
 
+    let VaultBalancesResponse { bal0, bal1, .. } = query::vault_balances(deps.as_ref());
+
+    let first_deposit = bal0.is_zero() && bal1.is_zero();
+    let vault_is_limit = bal0.is_zero() ^ bal1.is_zero();
+    let deposit_is_limit = amount0.is_zero() ^ amount1.is_zero();
+
+    if !first_deposit && deposit_is_limit && (!vault_is_limit || bal0 == amount1 || bal1 == amount0) {
+        return Err(IndeterminateProportionDeposit { 
+            current_vault_proportion: format!("({} : {})", bal0, bal1),
+            got: format!("({} : {})", amount0, amount1) 
+        })
+    }
+
     let CalcSharesAndUsableAmountsResponse {
         shares,
         usable_amount0: amount0_used,

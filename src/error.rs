@@ -74,7 +74,10 @@ pub enum DepositError {
     DepositedAmountsBelowMin { used: String, wanted: String },
 
     #[error("Deposit must be above {min_liquidity}, got: {got}")]
-    DepositedAmountBelowMinLiquidity { min_liquidity: Uint128, got: String }
+    DepositedAmountBelowMinLiquidity { min_liquidity: Uint128, got: String },
+
+    #[error("The vault current proportion is: {current_vault_proportion}; got: {got}, which produces 0 shares")]
+    IndeterminateProportionDeposit { current_vault_proportion: String, got: String }
 }
 
 #[derive(Error, Debug, PartialEq)]
