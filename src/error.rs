@@ -49,8 +49,8 @@ pub enum InstantiationError {
     #[error("The vault admin cant have any fee if the vault doesnt have any admin")]
     AdminFeeWithoutAdmin { },
 
-    #[error("Contradiction: {reason}")]
-    ContradictoryConfig { reason: String },
+    #[error("Contradiction: {reason}; Hint: {hint}")]
+    ContradictoryConfig { reason: String, hint: String },
 
     #[error("Price factors are Uint128 Decimals greater than 1, got: {0}")]
     InvalidPriceFactor(Uint128),
@@ -74,7 +74,10 @@ pub enum DepositError {
     DepositedAmountsBelowMin { used: String, wanted: String },
 
     #[error("Deposit must be above {min_liquidity}, got: {got}")]
-    DepositedAmountBelowMinLiquidity { min_liquidity: Uint128, got: String }
+    DepositedAmountBelowMinLiquidity { min_liquidity: Uint128, got: String },
+
+    #[error("The vault current proportion is: {current_vault_proportion}; got: {got}, which produces 0 shares")]
+    IndeterminateProportionDeposit { current_vault_proportion: String, got: String }
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -132,6 +135,12 @@ pub enum ProtocolOperationError {
 
     #[error("Invalid protocol fee: max: {max}; got: {got}")]
     InvalidProtocolFee { max: Uint128, got: Uint128 },
+
+    #[error("Tried to rescue coins with denom {0}, but those are already handled by the contract")]
+    NonRescuableDenom(String),
+
+    #[error("Tried to rescue coins with non-existent denom {0}")]
+    InvalidDenom(String)
 }
 
 #[derive(Error, Debug, PartialEq)]

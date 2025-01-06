@@ -1,6 +1,5 @@
 use cosmwasm_std::{
-    entry_point, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response,
-    StdResult, Uint128,
+    entry_point, to_json_binary, BankMsg, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdResult, Uint128, coins
 };
 use cw20_base::allowances::{
     execute_burn_from, execute_decrease_allowance, execute_increase_allowance, execute_send_from,
@@ -12,6 +11,8 @@ use cw20_base::contract::{
 use cw20_base::state::{MinterData, TokenInfo, TOKEN_INFO};
 use osmosis_std::types::osmosis::concentratedliquidity::v1beta1::MsgCreatePositionResponse;
 
+use crate::constants::{PROTOCOL_ADDR, VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM};
+use crate::error::InstantiationError;
 use crate::msg::QueryMsg;
 use crate::state::{FeesInfo, FundsInfo, FEES_INFO, FUNDS_INFO};
 use crate::{do_me, execute, query};
@@ -32,7 +33,7 @@ pub fn instantiate(
     let vault_info = VaultInfo::new(msg.vault_info.clone(), deps.as_ref())?;
     let vault_parameters = VaultParameters::new(msg.vault_parameters.clone())?;
     let vault_state = VaultState::default();
-    let fees_info = FeesInfo::new(msg.vault_info.admin_fee, &vault_info, &info)?;
+    let fees_info = FeesInfo::new(msg.vault_info.admin_fee, &vault_info)?;
     let funds_info = FundsInfo::default();
     let token_info = TokenInfo {
         name: msg.vault_info.vault_name,
@@ -56,7 +57,20 @@ pub fn instantiate(
         TOKEN_INFO.save(deps.storage, &token_info)?;
     }.unwrap();
 
-    Ok(Response::new())
+    let paid_amount = cw_utils::must_pay(&info, VAULT_CREATION_COST_DENOM).unwrap_or_default();
+
+    if paid_amount != VAULT_CREATION_COST {
+        Err(InstantiationError::VaultCreationCostNotPaid {
+            cost: VAULT_CREATION_COST.into(),
+            denom: VAULT_CREATION_COST_DENOM.into(),
+            got: paid_amount.into()
+        })?
+    } else { 
+        Ok(Response::new().add_message(BankMsg::Send { 
+            to_address: PROTOCOL_ADDR.into(),
+            amount: coins(VAULT_CREATION_COST.into(), VAULT_CREATION_COST_DENOM)
+        })) 
+    }
 }
 
 #[entry_point]
@@ -108,6 +122,7 @@ pub fn execute(
         ChangeVaultParameters(parameters) => Ok(execute::change_vault_parameters(parameters, deps, info)?),
         ChangeAdminFee { new_admin_fee } => Ok(execute::change_admin_fee(new_admin_fee, deps, info)?),
         ChangeProtocolFee { new_protocol_fee } => Ok(execute::change_protocol_fee(new_protocol_fee, deps, info)?),
+        RescueIncentives { incentive_denom } => Ok(execute::rescue_incentives(deps, info, env, incentive_denom)?),
 
         // Cw20 Realization.
         Transfer { recipient, amount } => Ok(execute_transfer(deps, env, info, recipient, amount)?),
@@ -153,13 +168,13 @@ pub mod test {
             deposit_msg, rebalancer_anyone, vault_params, PoolMockup, VaultMockup, OSMO_DENOM,
             USDC_DENOM,
         },
-        msg::{DepositMsg, WithdrawMsg},
+        msg::{DepositMsg, PositionBalancesWithFeesResponse, WithdrawMsg},
         state::PositionType,
         utils::price_function_inv,
     };
 
     use super::*;
-    use cosmwasm_std::{coin, testing::{mock_dependencies, mock_env}, Addr, Api, Coin, Decimal};
+    use cosmwasm_std::{coin, testing::mock_dependencies, Addr, Api, Coin, Decimal};
     use osmosis_test_tube::Account;
 
     #[test]
@@ -446,13 +461,15 @@ pub mod test {
         );
         assert!(improper_withdrawal.is_err());
 
+        // NOTE: We subtract 6 atoms to account for dust truncation during up to 
+        //       3 liquidity proportion calculations and 3 position withdrawals.
         vault_mockup.wasm.execute(
             vault_mockup.vault_addr.as_ref(), 
             &ExecuteMsg::Withdraw(
                 WithdrawMsg {
                     shares: shares_got,
-                    amount0_min: vault_balances_before_withdrawal.bal0 - MIN_LIQUIDITY - Uint128::one(),
-                    amount1_min: vault_balances_before_withdrawal.bal1 - MIN_LIQUIDITY - Uint128::one(),
+                    amount0_min: vault_balances_before_withdrawal.bal0 - MIN_LIQUIDITY - Uint128::new(6),
+                    amount1_min: vault_balances_before_withdrawal.bal1 - MIN_LIQUIDITY - Uint128::new(6),
                     to: pool_mockup.user1.address()
                 }
             ),
@@ -494,9 +511,6 @@ pub mod test {
         assert!(fees.admin_tokens1_owned.is_zero());
         assert!(fees.protocol_tokens0_owned.is_zero());
         assert!(!fees.protocol_tokens1_owned.is_zero());
-
-        // TODO
-        // vault_mockup.protocol_withdraw().unwrap();
     }
 
     #[test]
@@ -592,8 +606,8 @@ pub mod test {
         let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
         vault_mockup.withdraw(shares, &pool_mockup.user1).unwrap();
 
-        let bals = vault_mockup.vault_balances_query();
-        let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
+        let _bals = vault_mockup.vault_balances_query();
+        let _shares = vault_mockup.shares_query(&pool_mockup.user1.address());
     }
 
     #[test]
@@ -610,6 +624,7 @@ pub mod test {
 
         vault_mockup.withdraw(Uint128::new(4444), &pool_mockup.user1).unwrap();
         vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+
         let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
         vault_mockup.withdraw(shares/Uint128::new(2), &pool_mockup.user1).unwrap();
         vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
@@ -617,6 +632,16 @@ pub mod test {
         vault_mockup.withdraw(shares, &pool_mockup.user1).unwrap();
         let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
         assert!(shares.is_zero());
+    }
+
+    #[test]
+    fn partial_withdrawal_minimized_case() {
+        let pool_mockup = PoolMockup::new(200_000, 100_000);
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", "0.55"));
+        vault_mockup.deposit(5556, 5556, &pool_mockup.user1).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
+        vault_mockup.withdraw(shares/Uint128::new(2), &pool_mockup.user1).unwrap();
     }
     
     #[test]
@@ -840,5 +865,183 @@ pub mod test {
         let c = Addr::unchecked(PROTOCOL_ADDR.to_uppercase());
         assert_ne!(a, c);
     }
+
+    #[test]
+    fn illegal_params() {
+        let pool_mockup = PoolMockup::new(200_000, 100_000);
+
+        let illegal_params = [
+            ("1"   , "1"   , "0"   ), ("1.01", "1.01", "1"   ), ("1"   , "1"   , "0.99"),
+            ("1.01", "1"   , "0"   )                          , ("1.01", "1"   , "0.99"),
+            ("1"   , "1.01", "0"   ), ("1.01", "1"   , "1"   ), ("1"   , "1.01", "0.99"),
+        ].map(|(k, k2, w)| vault_params(k, k2, w));
+
+        for params in illegal_params {
+            assert!(VaultMockup::try_new(&pool_mockup, params).is_err())
+        }
+    }
+
+    #[test]
+    fn full_range_balanced_vault_smoke() {
+        let pool_mockup = PoolMockup::new(200_000, 100_000);
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("1", "1.5", "1"));
+
+        let (x, y) = (50_000, 25_000);
+        vault_mockup.deposit(x, y, &pool_mockup.user1).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        let default_bals = PositionBalancesWithFeesResponse::default();
+
+        let VaultState { 
+            full_range_position_id, base_position_id, limit_position_id, ..
+        } = vault_mockup.vault_state_query();
+
+        assert!(
+            full_range_position_id.is_some() && 
+            base_position_id.is_none() && 
+            limit_position_id.is_none()
+        );
+
+        let bals = vault_mockup.position_balances_query(PositionType::FullRange);
+        assert_eq!(bals.bal0.u128(), x - 1);
+        assert_eq!(bals.bal1.u128(), y - 1);
+        assert!(bals.bal0_fees.is_zero() && bals.bal1_fees.is_zero());
+        assert_eq!(vault_mockup.position_balances_query(PositionType::Base), default_bals);
+        assert_eq!(vault_mockup.position_balances_query(PositionType::Limit), default_bals);
+
+        assert!(pool_mockup.osmo_balance_query(&vault_mockup.vault_addr).is_zero());
+        assert!(pool_mockup.usdc_balance_query(&vault_mockup.vault_addr).is_zero());
+
+        pool_mockup.swap_osmo_for_usdc(&pool_mockup.user2, 20_000).unwrap();
+        let bals = vault_mockup.position_balances_query(PositionType::FullRange);
+        assert!(!bals.bal1_fees.is_zero());
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+
+        let VaultState { 
+            full_range_position_id, base_position_id, limit_position_id, ..
+        } = vault_mockup.vault_state_query();
+
+        assert!(
+            full_range_position_id.is_some() && 
+            base_position_id.is_none() && 
+            limit_position_id.is_some()
+        );
+
+        assert_ne!(vault_mockup.position_balances_query(PositionType::FullRange), default_bals);
+        assert_eq!(vault_mockup.position_balances_query(PositionType::Base), default_bals);
+        assert_ne!(vault_mockup.position_balances_query(PositionType::Limit), default_bals);
+
+        // NOTE: 2 rebalances => 2 atoms. TODO: What about USDC atoms?
+        assert_eq!(pool_mockup.osmo_balance_query(&vault_mockup.vault_addr).u128(), 2);
+        assert_eq!(pool_mockup.usdc_balance_query(&vault_mockup.vault_addr).u128(), 0);
+    }
+
+    /*
+    #[test]
+    fn full_range_unbalanced_vault() {
+        // NOTE: This case has as starting point the last one!
+        assert!(false, "TODO");
+    }
+
+    #[test]
+    fn base_position_vault() {
+        assert!(false, "TODO");
+    }
+    */
+
+    #[test]
+    fn edge_weight_lower_bound() {
+        let pool_mockup = PoolMockup::new(200_000, 100_000);
+        let min_weight = "0.000000000000000001";
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", min_weight));
+
+        vault_mockup.deposit(1_001, 1_001, &pool_mockup.user1).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        pool_mockup.swap_osmo_for_usdc(&pool_mockup.user2, 50_000).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+    }
+
+    #[test]
+    fn edge_weight_upper_bound() {
+        let pool_mockup = PoolMockup::new(100_000, 33_000);
+        let max_weight = "0.999999999999999999";
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", max_weight));
+
+        vault_mockup.deposit(10000, 3300, &pool_mockup.user1).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        pool_mockup.swap_osmo_for_usdc(&pool_mockup.user2, 50_000).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+    }
+
+    /*
+    #[test]
+    fn brute_force_edge_weight_panics() {
+        assert!(false, "i need fuzzing for this...");
+    }
+    */
+
+    #[test]
+    fn prod_test_case() {
+        let pool_mockup = PoolMockup::new(540_642_000_000, 1_000_000_000_000);
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("1.7", "1.5", "0.39"));
+
+        vault_mockup.deposit(1_000_000, 50_000_000, &pool_mockup.user1).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+    }
+
+    /*
+    #[test]
+    fn protocol_revenue_during_instantiation() {
+        assert!(false, "TODO");
+    }
+
+    #[test]
+    fn protocol_revenue_from_fees() {
+        assert!(false, "TODO");
+    }
+    */
+
+    #[test]
+    fn zero_shares_invariant_breaking() {
+        let pool_mockup = PoolMockup::new(1_000_000_000, 90_123_456_789_000);
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("1.12", "1.08", "0"));
+
+        let (osmo_in, usdc_in) = (9_818_388, 20_000_000_000);
+        vault_mockup.deposit(osmo_in, usdc_in, &pool_mockup.user2).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+
+        pool_mockup.swap_usdc_for_osmo(&pool_mockup.user1, 10_000).unwrap();
+
+        let out_of_proportion_deposit0 = vault_mockup.deposit(100_000, 0, &pool_mockup.user2);
+        let out_of_proportion_deposit1 = vault_mockup.deposit(0, 100_000, &pool_mockup.user2);
+        // TODO: How do I distinguish between expected (ContractError) and unexpected
+        //       (RuntimeError, panics, ...) from this test? Eg, those 2 assertions below
+        //       only work because the broken invariant produce a `RuntimeError` after the panic.
+        assert!(out_of_proportion_deposit0.is_err());
+        assert!(out_of_proportion_deposit1.is_err());
+
+        pool_mockup.swap_usdc_for_osmo(&pool_mockup.user1, 100_000_000).unwrap();
+        vault_mockup.deposit(100_000, 0, &pool_mockup.user2).unwrap();
+        assert!(vault_mockup.deposit(0, 100_000, &pool_mockup.user2).is_err());
+    }
+
+
+    #[test]
+    fn limit_vault_with_non_limit_deposit() {
+        let pool_mockup = PoolMockup::new(1_000_000_000, 90_123_456_789_000);
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("1.12", "1.08", "0"));
+
+        vault_mockup.deposit(100_000, 0, &pool_mockup.user2).unwrap();
+        vault_mockup.deposit(100_000, 10_000, &pool_mockup.user1).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+
+        vault_mockup.deposit(10_000, 1000, &pool_mockup.user2).unwrap();
+        assert!(vault_mockup.deposit(0, 1000, &pool_mockup.user2).is_err());
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+        let bals = vault_mockup.vault_balances_query();
+        assert!(bals.bal1.is_zero() && !bals.bal0.is_zero());
+    }
+
 
 }

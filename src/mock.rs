@@ -22,14 +22,12 @@ pub mod mock {
     };
 
     use crate::{
-        constants::{MAX_TICK, MIN_TICK, TWAP_SECONDS, VAULT_CREATION_COST_DENOM},
+        constants::{MAX_TICK, MIN_TICK, TWAP_SECONDS, VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM},
         msg::{
-            DepositMsg, ExecuteMsg, InstantiateMsg, PositionBalancesWithFeesResponse, QueryMsg,
-            VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg,
-            VaultRebalancerInstantiateMsg, WithdrawMsg,
+            CalcSharesAndUsableAmountsResponse, DepositMsg, ExecuteMsg, InstantiateMsg, PositionBalancesWithFeesResponse, QueryMsg, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg, WithdrawMsg
         },
         state::{
-            FeesInfo, PositionType, ProtocolFee, VaultCreationCost, VaultParameters, VaultState,
+            FeesInfo, PositionType, ProtocolFee, VaultParameters, VaultState,
         },
     };
 
@@ -50,11 +48,12 @@ pub mod mock {
 
     impl PoolMockup {
         pub fn new_with_spread(usdc_in: u128, osmo_in: u128, spread_factor: &str) -> Self {
+            
             let app = OsmosisTestApp::new();
             
             let init_coins = &[
-                Coin::new(1_000_000_000_000u128, USDC_DENOM),
-                Coin::new(1_000_000_000_000u128, OSMO_DENOM),
+                Coin::new(1_000_000_000_000_000u128, USDC_DENOM),
+                Coin::new(1_000_000_000_000_000u128, OSMO_DENOM),
             ];
 
             let mut accounts = app.init_accounts(init_coins, 3).unwrap().into_iter();
@@ -98,8 +97,8 @@ pub mod mock {
                             Coin::new(usdc_in, USDC_DENOM).into(),
                             Coin::new(osmo_in, OSMO_DENOM).into(),
                         ],
-                        token_min_amount0: usdc_in.to_string(),
-                        token_min_amount1: osmo_in.to_string(),
+                        token_min_amount0: ((usdc_in*99999)/100000).to_string(),
+                        token_min_amount1: ((osmo_in*99999)/100000).to_string(),
                     },
                     &deployer,
                 )
@@ -162,19 +161,19 @@ pub mod mock {
             Ok(usdc_got?)
         }
 
-        pub fn osmo_balance_query(&self, address: &str) -> Uint128 {
+        pub fn osmo_balance_query<T: ToString>(&self, address: T) -> Uint128 {
             let bank = Bank::new(&self.app);
             let amount = bank.query_balance(&QueryBalanceRequest {
-                address: address.into(),
+                address: address.to_string(),
                 denom: OSMO_DENOM.into()
             }).unwrap().balance.unwrap().amount;
             Uint128::from_str(&amount).unwrap()
         }
 
-        pub fn usdc_balance_query(&self, address: &str) -> Uint128 {
+        pub fn usdc_balance_query<T: ToString>(&self, address: T) -> Uint128 {
             let bank = Bank::new(&self.app);
             let amount = bank.query_balance(&QueryBalanceRequest {
-                address: address.into(),
+                address: address.to_string(),
                 denom: USDC_DENOM.into()
             }).unwrap().balance.unwrap().amount;
             Uint128::from_str(&amount).unwrap()
@@ -237,7 +236,7 @@ pub mod mock {
 
     impl VaultMockup<'_> {
         pub fn new(pool_info: &PoolMockup, params: VaultParametersInstantiateMsg) -> VaultMockup {
-            Self::new_with_rebalancer(pool_info, params, VaultRebalancerInstantiateMsg::Admin {})
+            Self::try_new_with_rebalancer(pool_info, params, VaultRebalancerInstantiateMsg::Admin {}).unwrap()
         }
 
         pub fn new_with_rebalancer(
@@ -245,11 +244,23 @@ pub mod mock {
             params: VaultParametersInstantiateMsg,
             rebalancer: VaultRebalancerInstantiateMsg
         ) -> VaultMockup {
+            Self::try_new_with_rebalancer(pool_info, params, rebalancer).unwrap()
+        }
+
+        pub fn try_new(pool_info: &PoolMockup, params: VaultParametersInstantiateMsg) -> Result<VaultMockup> {
+            Self::try_new_with_rebalancer(pool_info, params, VaultRebalancerInstantiateMsg::Admin {})
+        }
+
+        pub fn try_new_with_rebalancer(
+            pool_info: &PoolMockup,
+            params: VaultParametersInstantiateMsg,
+            rebalancer: VaultRebalancerInstantiateMsg
+        ) -> Result<VaultMockup> {
             let wasm = Wasm::new(&pool_info.app);
             let code_id = store_vaults_code(&wasm, &pool_info.deployer);
             let api = mock_dependencies().api;
 
-            let usdc_fee = Coin::new(VaultCreationCost::default().0.into(), USDC_DENOM);
+            let usdc_fee = Coin::new(VAULT_CREATION_COST.into(), USDC_DENOM);
             let vault_addr = wasm
                 .instantiate(
                     code_id,
@@ -268,15 +279,13 @@ pub mod mock {
                     Some("my vault"),
                     &[usdc_fee],
                     &pool_info.deployer,
-                )
-                .unwrap()
+                )?
                 .data
                 .address;
 
-            let vault_addr = api.addr_validate(&vault_addr).unwrap();
+            let vault_addr = api.addr_validate(&vault_addr)?;
 
-            VaultMockup { vault_addr, wasm }
-
+            Ok(VaultMockup { vault_addr, wasm })
         }
 
         pub fn deposit(
@@ -493,5 +502,16 @@ pub mod mock {
                 &QueryMsg::FeesInfo {}
             ).unwrap()
         }
+
+        pub fn shares_and_usable_amounts_query(&self, usdc: u128, osmo: u128) -> CalcSharesAndUsableAmountsResponse {
+            self.wasm.query(
+                self.vault_addr.as_ref(), 
+                &QueryMsg::CalcSharesAndUsableAmounts { 
+                    for_amount0: Uint128::new(usdc), 
+                    for_amount1: Uint128::new(osmo)
+                }
+            ).unwrap()
+        }
+
     }
 }

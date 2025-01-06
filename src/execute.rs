@@ -1,20 +1,26 @@
+use core::panic;
 use std::str::FromStr;
 
 use cosmwasm_std::{
-    coin, Addr, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg,
-    Uint128,
+    coin, coins, Addr, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg, Uint128
 };
 use cw20_base::{
     contract::{execute_burn, execute_mint, query_balance, query_token_info},
     state::TOKEN_INFO,
 };
-use osmosis_std::types::osmosis::concentratedliquidity::v1beta1::{
-    MsgCollectSpreadRewards, MsgCreatePosition, MsgWithdrawPosition, PositionByIdRequest,
+use osmosis_std::types::{
+    cosmos::{
+        bank::v1beta1::{QueryBalanceRequest, QueryBalanceResponse},
+        base::v1beta1::Coin
+    },
+    osmosis::concentratedliquidity::v1beta1::{
+        MsgCollectIncentives, MsgCollectSpreadRewards, MsgCreatePosition, MsgWithdrawPosition, PositionByIdRequest
+    }
 };
 
 use crate::{
     assert_approx_eq,
-    constants::{MIN_LIQUIDITY, POSITION_CREATION_SLIPPAGE, PROTOCOL_ADDR, VAULT_CREATION_COST_DENOM},
+    constants::{MIN_LIQUIDITY, POSITION_CREATION_SLIPPAGE, PROTOCOL_ADDR},
     do_some,
     error::{
         AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError,
@@ -88,6 +94,19 @@ pub fn deposit(
         return Err(DepositedAmountBelowMinLiquidity { 
             min_liquidity: MIN_LIQUIDITY,
             got: format!("({}, {})", amount0, amount1)
+        })
+    }
+
+    let VaultBalancesResponse { bal0, bal1, .. } = query::vault_balances(deps.as_ref());
+
+    let first_deposit = bal0.is_zero() && bal1.is_zero();
+    let vault_is_limit = bal0.is_zero() ^ bal1.is_zero();
+    let deposit_is_limit = amount0.is_zero() ^ amount1.is_zero();
+
+    if !first_deposit && deposit_is_limit && (!vault_is_limit || bal0 == amount1 || bal1 == amount0) {
+        return Err(IndeterminateProportionDeposit { 
+            current_vault_proportion: format!("({} : {})", bal0, bal1),
+            got: format!("({} : {})", amount0, amount1) 
         })
     }
 
@@ -248,25 +267,6 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         (x0, y0)
     };
 
-    // Invariant: If any of the balanced balances is not zero, and if the vault
-    //            uses full range positions, then both balances for the full
-    //            range position shouldnt be zero, or the resulting position
-    //            wouldnt be in proportion.
-    if full_range_weight.is_zero() {
-        assert!(full_range_balance0.is_zero() && full_range_balance1.is_zero());
-    } else if balanced_balance1.is_zero() || balanced_balance0.is_zero() {
-        assert!(full_range_balance0.is_zero() && full_range_balance1.is_zero());
-    } else {
-        assert!(!full_range_balance0.is_zero() && !full_range_balance1.is_zero());
-
-        let balances_price = full_range_balance1.checked_div(full_range_balance0).unwrap();
-        // Invariant: The difference between prices will be atomic, as `utils::calc_x0`
-        //            already ensures that the proportions hold. We still take one
-        //            atom to compensate for roundings.
-        // Proof: Trivial from how $x_0$ is derived in the whitepaper.
-        assert_approx_eq!(balances_price, price, Decimal::one());
-    }
-
     let (base_range_balance0, base_range_balance1) = if !base_factor.is_one() {
         // Invariant: Wont underflow, because full range balances will always be
         //            lower than the total balanced balances (see `calc_x0`).
@@ -278,18 +278,13 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         (Decimal::zero(), Decimal::zero())
     };
 
-    if !base_factor.is_one() && !balanced_balance0.is_zero() {
-        assert!(!base_range_balance0.is_zero() && !base_range_balance1.is_zero());
-    }
-
-
     let (limit_balance0, limit_balance1) = {
         // Invariant: Wont overflow because `bal >= balanced_balance`, as we earlier checked.
         let limit_balance0 = Decimal::new(bal0).checked_sub(balanced_balance0).unwrap();
         let limit_balance1 = Decimal::new(bal1).checked_sub(balanced_balance1).unwrap();
         (limit_balance0, limit_balance1)
     };
-
+    
     let mut new_position_msgs: Vec<SubMsg> = vec![];
 
     // If `full_range_balance0` is not zero, we already checked that neither
@@ -423,18 +418,24 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         Ok(info)
     }).unwrap();
 
-    let position_ids = liquidity_removal_msgs
+    let position_ids: Vec<_> = liquidity_removal_msgs
         .iter()
         .map(|msg| msg.position_id)
         .collect();
 
     let rewards_claim_msg = MsgCollectSpreadRewards {
+        position_ids: position_ids.clone(),
+        sender: env.contract.address.clone().into()
+    };
+
+    let incentives_claim_msg = MsgCollectIncentives {
         position_ids,
-        sender: env.contract.address.into(),
+        sender: env.contract.address.clone().into()
     };
 
     Ok(Response::new()
         .add_message(rewards_claim_msg)
+        .add_message(incentives_claim_msg)
         .add_messages(liquidity_removal_msgs)
         .add_submessages(new_position_msgs)
     )
@@ -578,11 +579,12 @@ pub fn create_position_msg(
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let pool = vault_info.pool(&deps.querier);
 
-    let tokens_provided = vec![
+    let mut tokens_provided: Vec<_> = vec![
         Coin { denom: pool.token0.clone(), amount: raw(&tokens_provided0) },
         Coin { denom: pool.token1.clone(), amount: raw(&tokens_provided1) },
     ].into_iter().filter(|c| c.amount != "0").collect();
-
+    tokens_provided.sort_by(|x, y| x.denom.cmp(&y.denom));
+    
     let lower_tick = vault_info.closest_valid_tick(lower_tick, &deps.querier).into();
     let upper_tick = vault_info.closest_valid_tick(upper_tick, &deps.querier).into();
 
@@ -673,8 +675,15 @@ pub fn withdraw(
         Decimal::raw(shares.into()).checked_div(total_shares_supply).unwrap()
     ).unwrap();
 
-    let expected_withdrawn_amount0 = shares_proportion.mul_raw(bal0).atomics();
-    let expected_withdrawn_amount1 = shares_proportion.mul_raw(bal1).atomics();
+    // NOTE: We subtract 3 atoms (1 for each possible position) to account
+    //       for dust errors during liquidity proportion calculation.
+    let expected_withdrawn_amount0 = shares_proportion
+        .mul_raw(bal0).atomics()
+        .checked_sub(Uint128::new(3)).unwrap_or(Uint128::zero());
+
+    let expected_withdrawn_amount1 = shares_proportion
+        .mul_raw(bal1).atomics()
+        .checked_sub(Uint128::new(3)).unwrap_or(Uint128::zero());
 
     // Invariant: Wont underflow as `shares_proportion` is a valid weight.
     FUNDS_INFO.update(deps.storage, |mut funds| -> StdResult<_> {
@@ -699,34 +708,33 @@ pub fn withdraw(
     }
 
     let liquidity_removal_msgs: Vec<_> = vec![
-        remove_liquidity_msg(
-            PositionType::FullRange,
-            deps.as_ref(),
-            &env,
-            &shares_proportion,
-        ),
+        remove_liquidity_msg(PositionType::FullRange, deps.as_ref(), &env, &shares_proportion),
         remove_liquidity_msg(PositionType::Base, deps.as_ref(), &env, &shares_proportion),
         remove_liquidity_msg(PositionType::Limit, deps.as_ref(), &env, &shares_proportion),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    ].into_iter().flatten().collect();
 
     if shares_proportion.is_max() {
+        // Hypothesis: `unreachable!()` due to MIN_LIQUIDITY; VaultState position IDs can only
+        //             change with rebalances.
         VAULT_STATE.update(deps.storage, |x| -> StdResult<_> { Ok(VaultState {
             last_price_and_timestamp: x.last_price_and_timestamp,
             ..VaultState::default()
         })}).unwrap();
     }
 
-    let position_ids = liquidity_removal_msgs
+    let position_ids: Vec<_> = liquidity_removal_msgs
         .iter()
         .map(|msg| msg.position_id)
         .collect();
 
     let rewards_claim_msg = MsgCollectSpreadRewards {
-        position_ids,
+        position_ids: position_ids.clone(),
         sender: env.contract.address.clone().into(),
+    };
+
+    let incentives_claim_msg = MsgCollectIncentives {
+        position_ids,
+        sender: env.contract.address.clone().into()
     };
 
     // Invariant: `VAULT_INFO` will always be present after instantiation.
@@ -737,6 +745,7 @@ pub fn withdraw(
 
     Ok(shares_burn_response
         .add_message(rewards_claim_msg)
+        .add_message(incentives_claim_msg)
         .add_messages(liquidity_removal_msgs)
         .add_message(BankMsg::Send {
             to_address: withdrawal_address.into(),
@@ -760,14 +769,12 @@ pub fn withdraw_protocol_fees(deps: DepsMut, info: MessageInfo) -> Result<Respon
         to_address: PROTOCOL_ADDR.into(),
         amount: vec![
             coin(fees.protocol_tokens0_owned.into(), denom0),
-            coin(fees.protocol_tokens1_owned.into(), denom1),
-            coin(fees.protocol_vault_creation_tokens_owned.into(), VAULT_CREATION_COST_DENOM)
+            coin(fees.protocol_tokens1_owned.into(), denom1)
         ].into_iter().filter(|c| !c.amount.is_zero()).collect() 
     };
 
     fees.protocol_tokens0_owned = Uint128::zero();
     fees.protocol_tokens1_owned = Uint128::zero();
-    fees.protocol_vault_creation_tokens_owned = Uint128::zero();
 
     // Invariant: Will serialize as all types are proper.
     FEES_INFO.save(deps.storage, &fees).unwrap();
@@ -788,6 +795,44 @@ pub fn change_protocol_fee(
     // Invariant: Wont panic as we ensured all types are proper during development.
     FEES_INFO.save(deps.storage, &new_fees_info).unwrap();
     Ok(Response::new())
+}
+
+pub fn rescue_incentives(
+    deps: DepsMut,
+    info: MessageInfo,
+    env: Env,
+    denom_to_rescue: String
+) -> Result<Response, ProtocolOperationError> {
+    use ProtocolOperationError::*;
+
+    sender_is_protocol(info)?;
+
+    let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms(&deps.querier);
+
+    if [denom0, denom1].contains(&denom_to_rescue) {
+        return Err(NonRescuableDenom(denom_to_rescue));
+    }
+    
+    let bals = QueryBalanceRequest { 
+        address: env.contract.address.into(),
+        denom: denom_to_rescue.clone()
+    }.query(&deps.querier);
+
+    // Hypothesis: If the pattern matches, `balances` will always be `Some`, even if
+    //             `amount.is_zero()`. Moreover, it will never match the `Err` variant
+    //             even if `amount.is_zero()`. That is: this code will never panic, and
+    //             the error variant will only happen if `denom_to_rescue` is not a valid
+    //             denom.
+    if let Ok(QueryBalanceResponse { balance }) = bals {
+        let Coin { amount, .. } = balance.unwrap();
+        // Invariant: If `amount` is present, we know it will be a valid `u128`.
+        Ok(Response::new().add_message(BankMsg::Send {
+            to_address: PROTOCOL_ADDR.into(),
+            amount: coins(u128::from_str(&amount).unwrap(), denom_to_rescue)
+        }))
+    } else {
+        Err(InvalidDenom(denom_to_rescue))
+    }
 }
 
 pub fn withdraw_admin_fees(deps: DepsMut, info: MessageInfo) -> Result<Response, AdminOperationError> {
