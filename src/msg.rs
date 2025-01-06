@@ -80,6 +80,7 @@ pub enum ExecuteMsg {
     ChangeVaultParameters(VaultParametersInstantiateMsg),
     ChangeAdminFee { new_admin_fee: Uint128 },
     ChangeProtocolFee { new_protocol_fee: Uint128 },
+    RescueIncentives { incentive_denom: String },
 
     // Cw20 Realization.
     Transfer { recipient: String, amount: Uint128 },

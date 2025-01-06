@@ -122,6 +122,7 @@ pub fn execute(
         ChangeVaultParameters(parameters) => Ok(execute::change_vault_parameters(parameters, deps, info)?),
         ChangeAdminFee { new_admin_fee } => Ok(execute::change_admin_fee(new_admin_fee, deps, info)?),
         ChangeProtocolFee { new_protocol_fee } => Ok(execute::change_protocol_fee(new_protocol_fee, deps, info)?),
+        RescueIncentives { incentive_denom } => Ok(execute::rescue_incentives(deps, info, env, incentive_denom)?),
 
         // Cw20 Realization.
         Transfer { recipient, amount } => Ok(execute_transfer(deps, env, info, recipient, amount)?),
@@ -510,9 +511,6 @@ pub mod test {
         assert!(fees.admin_tokens1_owned.is_zero());
         assert!(fees.protocol_tokens0_owned.is_zero());
         assert!(!fees.protocol_tokens1_owned.is_zero());
-
-        // TODO
-        // vault_mockup.protocol_withdraw().unwrap();
     }
 
     #[test]
@@ -991,5 +989,45 @@ pub mod test {
         vault_mockup.deposit(1_000_000, 50_000_000, &pool_mockup.user1).unwrap();
         vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
     }
+
+    /*
+    #[test]
+    fn protocol_revenue_during_instantiation() {
+        assert!(false, "TODO");
+    }
+
+    #[test]
+    fn protocol_revenue_from_fees() {
+        assert!(false, "TODO");
+    }
+    */
+
+    #[test]
+    fn zero_shares_invariant_breaking() {
+        let pool_mockup = PoolMockup::new(1_000_000_000, 90_123_456_789_000);
+        let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("1.12", "1.08", "0"));
+
+        let (osmo_in, usdc_in) = (9_818_388, 20_000_000_000);
+        vault_mockup.deposit(osmo_in, usdc_in, &pool_mockup.user2).unwrap();
+        vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
+
+        pool_mockup.swap_usdc_for_osmo(&pool_mockup.user1, 10_000).unwrap();
+
+        let out_of_proportion_deposit0 = vault_mockup.deposit(100_000, 0, &pool_mockup.user2);
+        let out_of_proportion_deposit1 = vault_mockup.deposit(0, 100_000, &pool_mockup.user2);
+        // TODO: How do I distinguish between expected (ContractError) and unexpected
+        //       (RuntimeError, panics, ...) from the test? Eg, those 2 below only because
+        //       the broken invariant produce an `RuntimeError` after the panic.
+        assert!(out_of_proportion_deposit0.is_err());
+        assert!(out_of_proportion_deposit1.is_err());
+
+        // vault_mockup.deposit(100_000, 1, &pool_mockup.user2).unwrap();
+        // vault_mockup.deposit(1, 100_000, &pool_mockup.user2).unwrap();
+
+        pool_mockup.swap_usdc_for_osmo(&pool_mockup.user1, 100_000_000).unwrap();
+        vault_mockup.deposit(100_000, 0, &pool_mockup.user2).unwrap();
+        assert!(vault_mockup.deposit(0, 100_000, &pool_mockup.user2).is_err());
+    }
+
 
 }

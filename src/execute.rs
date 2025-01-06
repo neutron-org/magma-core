@@ -2,15 +2,20 @@ use core::panic;
 use std::str::FromStr;
 
 use cosmwasm_std::{
-    coin, Addr, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg,
-    Uint128,
+    coin, coins, Addr, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg, Uint128
 };
 use cw20_base::{
     contract::{execute_burn, execute_mint, query_balance, query_token_info},
     state::TOKEN_INFO,
 };
-use osmosis_std::types::osmosis::concentratedliquidity::v1beta1::{
-    MsgCollectSpreadRewards, MsgCreatePosition, MsgWithdrawPosition, PositionByIdRequest,
+use osmosis_std::types::{
+    cosmos::{
+        bank::v1beta1::{QueryBalanceRequest, QueryBalanceResponse},
+        base::v1beta1::Coin
+    },
+    osmosis::concentratedliquidity::v1beta1::{
+        MsgCollectIncentives, MsgCollectSpreadRewards, MsgCreatePosition, MsgWithdrawPosition, PositionByIdRequest
+    }
 };
 
 use crate::{
@@ -400,18 +405,24 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         Ok(info)
     }).unwrap();
 
-    let position_ids = liquidity_removal_msgs
+    let position_ids: Vec<_> = liquidity_removal_msgs
         .iter()
         .map(|msg| msg.position_id)
         .collect();
 
     let rewards_claim_msg = MsgCollectSpreadRewards {
+        position_ids: position_ids.clone(),
+        sender: env.contract.address.clone().into()
+    };
+
+    let incentives_claim_msg = MsgCollectIncentives {
         position_ids,
-        sender: env.contract.address.into(),
+        sender: env.contract.address.clone().into()
     };
 
     Ok(Response::new()
         .add_message(rewards_claim_msg)
+        .add_message(incentives_claim_msg)
         .add_messages(liquidity_removal_msgs)
         .add_submessages(new_position_msgs)
     )
@@ -690,20 +701,27 @@ pub fn withdraw(
     ].into_iter().flatten().collect();
 
     if shares_proportion.is_max() {
+        // Hypothesis: `unreachable!()` due to MIN_LIQUIDITY; VaultState position IDs can only
+        //             change with rebalances.
         VAULT_STATE.update(deps.storage, |x| -> StdResult<_> { Ok(VaultState {
             last_price_and_timestamp: x.last_price_and_timestamp,
             ..VaultState::default()
         })}).unwrap();
     }
 
-    let position_ids = liquidity_removal_msgs
+    let position_ids: Vec<_> = liquidity_removal_msgs
         .iter()
         .map(|msg| msg.position_id)
         .collect();
 
     let rewards_claim_msg = MsgCollectSpreadRewards {
-        position_ids,
+        position_ids: position_ids.clone(),
         sender: env.contract.address.clone().into(),
+    };
+
+    let incentives_claim_msg = MsgCollectIncentives {
+        position_ids,
+        sender: env.contract.address.clone().into()
     };
 
     // Invariant: `VAULT_INFO` will always be present after instantiation.
@@ -714,6 +732,7 @@ pub fn withdraw(
 
     Ok(shares_burn_response
         .add_message(rewards_claim_msg)
+        .add_message(incentives_claim_msg)
         .add_messages(liquidity_removal_msgs)
         .add_message(BankMsg::Send {
             to_address: withdrawal_address.into(),
@@ -763,6 +782,44 @@ pub fn change_protocol_fee(
     // Invariant: Wont panic as we ensured all types are proper during development.
     FEES_INFO.save(deps.storage, &new_fees_info).unwrap();
     Ok(Response::new())
+}
+
+pub fn rescue_incentives(
+    deps: DepsMut,
+    info: MessageInfo,
+    env: Env,
+    denom_to_rescue: String
+) -> Result<Response, ProtocolOperationError> {
+    use ProtocolOperationError::*;
+
+    sender_is_protocol(info)?;
+
+    let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms(&deps.querier);
+
+    if [denom0, denom1].contains(&denom_to_rescue) {
+        return Err(NonRescuableDenom(denom_to_rescue));
+    }
+    
+    let bals = QueryBalanceRequest { 
+        address: env.contract.address.into(),
+        denom: denom_to_rescue.clone()
+    }.query(&deps.querier);
+
+    // Hypothesis: If the pattern matches, `balances` will always be `Some`, even if
+    //             `amount.is_zero()`. Moreover, it will never match the `Err` variant
+    //             even if `amount.is_zero()`. That is: this code will never panic, and
+    //             the error variant will only happen if `denom_to_rescue` is not a valid
+    //             denom.
+    if let Ok(QueryBalanceResponse { balance }) = bals {
+        let Coin { amount, .. } = balance.unwrap();
+        // Invariant: If `amount` is present, we know it will be a valid `u128`.
+        Ok(Response::new().add_message(BankMsg::Send {
+            to_address: PROTOCOL_ADDR.into(),
+            amount: coins(u128::from_str(&amount).unwrap(), denom_to_rescue)
+        }))
+    } else {
+        Err(InvalidDenom(denom_to_rescue))
+    }
 }
 
 pub fn withdraw_admin_fees(deps: DepsMut, info: MessageInfo) -> Result<Response, AdminOperationError> {

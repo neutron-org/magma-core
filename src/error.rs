@@ -132,6 +132,12 @@ pub enum ProtocolOperationError {
 
     #[error("Invalid protocol fee: max: {max}; got: {got}")]
     InvalidProtocolFee { max: Uint128, got: Uint128 },
+
+    #[error("Tried to rescue coins with denom {0}, but those are already handled by the contract")]
+    NonRescuableDenom(String),
+
+    #[error("Tried to rescue coins with non-existent denom {0}")]
+    InvalidDenom(String)
 }
 
 #[derive(Error, Debug, PartialEq)]

@@ -24,9 +24,7 @@ pub mod mock {
     use crate::{
         constants::{MAX_TICK, MIN_TICK, TWAP_SECONDS, VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM},
         msg::{
-            DepositMsg, ExecuteMsg, InstantiateMsg, PositionBalancesWithFeesResponse, QueryMsg,
-            VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg,
-            VaultRebalancerInstantiateMsg, WithdrawMsg,
+            CalcSharesAndUsableAmountsResponse, DepositMsg, ExecuteMsg, InstantiateMsg, PositionBalancesWithFeesResponse, QueryMsg, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg, WithdrawMsg
         },
         state::{
             FeesInfo, PositionType, ProtocolFee, VaultParameters, VaultState,
@@ -504,5 +502,16 @@ pub mod mock {
                 &QueryMsg::FeesInfo {}
             ).unwrap()
         }
+
+        pub fn shares_and_usable_amounts_query(&self, usdc: u128, osmo: u128) -> CalcSharesAndUsableAmountsResponse {
+            self.wasm.query(
+                self.vault_addr.as_ref(), 
+                &QueryMsg::CalcSharesAndUsableAmounts { 
+                    for_amount0: Uint128::new(usdc), 
+                    for_amount1: Uint128::new(osmo)
+                }
+            ).unwrap()
+        }
+
     }
 }

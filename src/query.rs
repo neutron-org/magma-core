@@ -2,7 +2,7 @@ use std::{cmp, str::FromStr};
 
 use cosmwasm_std::{Deps, Uint128, Uint256};
 use cw20_base::state::TOKEN_INFO;
-use osmosis_std::types::osmosis::concentratedliquidity::v1beta1::PositionByIdRequest;
+use osmosis_std::types::{cosmos::base::v1beta1::Coin, osmosis::concentratedliquidity::v1beta1::PositionByIdRequest};
 
 use crate::{
     constants::MIN_LIQUIDITY,
@@ -90,74 +90,69 @@ pub fn position_balances_with_fees(
     position_type: PositionType,
     deps: Deps,
 ) -> PositionBalancesWithFeesResponse {
+    do_me! {
+        // Invariant: `VAULT_STATE` will always be present after instantiation.
+        let id = VAULT_STATE.load(deps.storage)?.from_position_type(position_type);
+        let id = match id {
+            None => return Ok(PositionBalancesWithFeesResponse::default()),
+            Some(id) => id
+        };
 
-    // Invariant: `VAULT_STATE` will always be present after instantiation.
-    let id = VAULT_STATE.load(deps.storage).unwrap().from_position_type(position_type);
-    let id = match id {
-        None => return PositionBalancesWithFeesResponse::default(),
-        Some(id) => id
-    };
+        // Invariant: We verified `id` is a valid position id the moment
+        //            we put it in the state, so the query wont fail.
+        let pos = PositionByIdRequest { position_id: id }
+            .query(&deps.querier)
+            .map(|x| x.position.unwrap())?;
 
-    // Invariant: We verified `id` is a valid position id the moment
-    //            we put it in the state, so the query wont fail.
-    let pos = PositionByIdRequest { position_id: id }
-        .query(&deps.querier)
-        .map(|x| x.position.unwrap())
-        .unwrap();
+        // Invariant: If position is valid, both assets will be always present,
+        //            even for out of range positions.
+        let asset0 = pos.asset0.unwrap();
+        let asset1 = pos.asset1.unwrap();
 
-    // Invariant: If position is valid, both assets will be always present,
-    //            even for out of range positions.
-    let asset0 = pos.asset0.unwrap();
-    let asset1 = pos.asset1.unwrap();
-    let rewards = pos.claimable_spread_rewards;
+        let spread_rewards = pos.claimable_spread_rewards;
+        let incentive_rewards = pos.claimable_incentives;
 
-    { 
-        // Invariant: `VAULT_INFO` will always be present after instantiation.
-        let (denom0, denom1) = VAULT_INFO
-            .load(deps.storage)
-            .unwrap()
-            .denoms(&deps.querier);
-        assert!(denom0 == asset0.denom && denom1 == asset1.denom);
-        // Invariant: If `pos` is a valid position, it will always have a `position_id`.
-        assert!(pos.position.unwrap().position_id == id);
-    }
+        {
+            let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms(&deps.querier);
+            // Invariant: `VAULT_INFO` will always be present after instantiation.
+            assert!(denom0 == asset0.denom && denom1 == asset1.denom);
+            // Invariant: If `pos` is a valid position, it will always have a `position_id`.
+            assert!(pos.position.unwrap().position_id == id);
+        }
 
-    // Invariant: Will never panic, because if the position has amounts
-    //            `amount0` and `amount1`, we know theyre valid `Uint128`s.
-    // NOTE: We subtract 1 to prevent dust error during withdrawals, as 
-    //       position withdrawals can leave 1 atomic token behind.
-    let bal0 = Uint128::from_str(&asset0.amount)
-        .unwrap()
-        .checked_sub(Uint128::one())
-        .unwrap_or(Uint128::zero());
+        // Invariant: Will never panic, because if the position has amounts
+        //            `amount0` and `amount1`, we know theyre valid `Uint128`s.
+        // NOTE: We subtract 1 to prevent dust error during withdrawals, as 
+        //       position withdrawals can leave 1 atomic token behind.
+        let bal0 = Uint128::from_str(&asset0.amount)?
+            .checked_sub(Uint128::one())
+            .unwrap_or(Uint128::zero());
 
-    let bal1 = Uint128::from_str(&asset1.amount)
-        .unwrap()
-        .checked_sub(Uint128::one())
-        .unwrap_or(Uint128::zero());
+        let bal1 = Uint128::from_str(&asset1.amount)?
+            .checked_sub(Uint128::one())
+            .unwrap_or(Uint128::zero());
 
-    // Invariant: If `rewards` is present, we know its a `Vec` of valid
-    //            amounts, so the conversion will never fail.
-    let rewards0 = rewards
-        .iter()
-        .find(|x| x.denom == asset0.denom)
-        .map(|x| Uint128::from_str(&x.amount))
-        .unwrap_or(Ok(Uint128::zero()))
-        .unwrap();
-    
-    let rewards1 = rewards
-        .iter()
-        .find(|x| x.denom == asset1.denom)
-        .map(|x| Uint128::from_str(&x.amount))
-        .unwrap_or(Ok(Uint128::zero()))
-        .unwrap();
+        let extract_amount = |from_coins: &Vec<Coin>, for_denom: &str| from_coins
+            .iter()
+            .find(|x| x.denom == for_denom)
+            .map(|x| Uint128::from_str(&x.amount))
+            .unwrap_or(Ok(Uint128::zero()));
 
-    PositionBalancesWithFeesResponse { 
-        bal0,
-        bal1,
-        bal0_fees: rewards0,
-        bal1_fees: rewards1
-    }
+        // Invariant: If `spread_rewards` or `incentive_rewards` is present, we know
+        //            its a `Vec` of valid amounts, so the conversions to `Uint128`s 
+        //            will never fail.
+        let spread_rewards0 = extract_amount(&spread_rewards, &asset0.denom)?;
+        let spread_rewards1 = extract_amount(&spread_rewards, &asset1.denom)?;
+        let incentive_rewards0 = extract_amount(&incentive_rewards, &asset0.denom)?;
+        let incentive_rewards1 = extract_amount(&incentive_rewards, &asset1.denom)?;
+
+        // Invariant: Wont overflow, as for that those tokens would
+        //            have to have supply above `Uint128::MAX`.
+        let bal0_fees = spread_rewards0.checked_add(incentive_rewards0)?;
+        let bal1_fees = spread_rewards1.checked_add(incentive_rewards1)?;
+
+        PositionBalancesWithFeesResponse { bal0, bal1, bal0_fees, bal1_fees }
+    }.unwrap()
 }
 
 /// # Arguments
