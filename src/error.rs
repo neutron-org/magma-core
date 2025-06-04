@@ -110,6 +110,7 @@ pub enum RebalanceError {
     PoolWithoutPrice(u64),
 }
 
+
 #[derive(Error, Debug, PartialEq)]
 pub enum WithdrawalError {
     #[error("Cant withdraw 0 shares")]
@@ -178,3 +179,9 @@ pub enum AdminOperationError {
     BurningAdminWithProposedNewAdmin()
 }
 
+
+#[derive(Error, Debug, PartialEq)]
+pub enum DexDepositError {
+    #[error("TODO : DELETE ME ")]
+    SomeError()
+}

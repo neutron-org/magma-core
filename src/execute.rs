@@ -17,13 +17,19 @@ use osmosis_std::types::{
         MsgCollectIncentives, MsgCollectSpreadRewards, MsgCreatePosition, MsgWithdrawPosition, PositionByIdRequest
     }
 };
+use neutron_std::types::neutron::dex::{
+     MsgDeposit, DexQuerier, QueryAllTickLiquidityResponse, TickLiquidity,
+};
+use neutron_std::types::cosmos::base::query::v1beta1::{
+    PageRequest,
+};
 
 use crate::{
     assert_approx_eq,
     constants::{MIN_LIQUIDITY, POSITION_CREATION_SLIPPAGE, PROTOCOL_ADDR},
     do_some,
     error::{
-        AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError,
+        AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError, DexDepositError
     },
     msg::{
         CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse,
@@ -35,6 +41,7 @@ use crate::{
         Weight, FEES_INFO, FUNDS_INFO, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE,
     },
     utils::{calc_x0, price_function_inv, raw},
+    duality_helpers::{get_tick_index_for_liquidity, sort_token_data_and_get_pair_id_str},
 };
 
 pub fn deposit(
@@ -997,3 +1004,69 @@ fn sender_is_admin(deps: Deps, info: MessageInfo) -> Result<Addr, AdminOperation
     } else { Ok(admin) }
 }
 
+fn dex_deposit(
+    deps: DepsMut, 
+    env: Env, fee: i64, start_tick: i64, end_tick: i64, amount0: Uint128, amount1: Uint128) -> Result<Response, DexDepositError>  {
+
+    let vault_info = VAULT_INFO.load(deps.storage).unwrap();
+    let pair_id = vault_info.pair_id;
+    
+    
+ let mut deposit_msg = MsgDeposit {
+    creator: env.contract.address.to_string(),
+    receiver: env.contract.address.to_string(),
+    token_a: pool.token_0,
+    token_b: pool.token_1,
+    amounts_a: vec![],
+    amounts_b: vec![],
+    tick_indexes_a_to_b: vec![],
+    fees: vec![],
+    options: vec![],
+};
+
+
+let pair_id  = sort_token_data_and_get_pair_id_str(&pool.token_0, &pool.token_1);
+let dex_querier = DexQuerier::new(&deps.querier);
+
+let pagination = Some(PageRequest {
+    key: vec![],
+    offset: 0,
+    limit: 1,
+    count_total: false,
+    reverse: false,
+});
+let liq_token0: QueryAllTickLiquidityResponse = dex_querier.tick_liquidity_all(pair_id.clone(), token0, pagination)?;
+let liq_token1: QueryAllTickLiquidityResponse = dex_querier.tick_liquidity_all(pair_id.clone(), token1, pagination)?;
+
+let min_token0_tick = get_tick_index_for_liquidity(&liq_token0.tick_liquidity[0]) * -1;
+let min_token1_tick = get_tick_index_for_liquidity(&liq_token1.tick_liquidity[0]);
+
+let middle_tick = (min_token0_tick + min_token1_tick) / 2;
+
+let token0_cheaper = min_token0_tick < min_token1_tick;
+
+let mut deposit_amount0 = Uint128::zero();
+let mut deposit_amount1 = Uint128::zero();
+
+for i in start_tick..end_tick {
+
+    if (i - fee <= middle_tick  && token0_cheaper)  || i + fee >= middle_tick && !token0_cheaper{ 
+        deposit_amount0 = Uint128::from_str("10").unwrap();
+    } 
+
+    if (i - fee <= middle_tick  && !token0_cheaper)  || i + fee >= middle_tick && token0_cheaper{ 
+        deposit_amount1 = Uint128::from_str("10").unwrap();
+    } 
+        
+    
+    
+    deposit_msg.tick_indexes_a_to_b.push(i);
+    deposit_msg.amounts_a.push(deposit_amount0.to_string());
+    deposit_msg.amounts_b.push(deposit_amount1.to_string());
+    deposit_msg.fees.push(fee as u64);
+}
+
+
+
+Ok(Response::new().add_message(deposit_msg))
+}
