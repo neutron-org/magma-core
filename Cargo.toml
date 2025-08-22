@@ -28,10 +28,10 @@ osmosis-test-tube = { version = "25.0.0", optional = true }
 # schemars = "0.8.20"
 cosmwasm-schema = { version = "2.0.4", default-features = false }
 osmosis-std = "0.25.0"
-cw-utils = "1.0.3"
+cw-utils = "2.0.0"
 
-cw20-base = { version = "1.1.2", features = ["library"] }
-cw2 = "2.0.0"
+cw20-base = { version = "2.0.0", features = ["library"] }
+cw20 = "2.0.0"
 
 
 readonly = "0.2.12"

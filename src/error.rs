@@ -1,6 +1,7 @@
-use cosmwasm_std::Uint128;
-use thiserror::Error;
 use crate::constants::TWAP_SECONDS;
+use cosmwasm_std::Uint128;
+use neutron_std::types::neutron::util::precdec::PrecDec;
+use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ContractError {
@@ -26,16 +27,26 @@ pub enum ContractError {
     ProtocolOperation(#[from] ProtocolOperationError),
 
     #[error("Cw20 error: {0}")]
-    Cw20(#[from] cw20_base::ContractError)
+    Cw20(#[from] cw20_base::ContractError),
+
+    #[error("Conversion error")]
+    ConversionError,
+
+    #[error("Invalid price")]
+    InvalidPrice,
 }
 
 #[derive(Error, Debug, PartialEq)]
 pub enum InstantiationError {
     #[error("Vault creation costs {cost} of token {denom}, got: {got}")]
-    VaultCreationCostNotPaid { cost: String, denom: String, got: String },
+    VaultCreationCostNotPaid {
+        cost: String,
+        denom: String,
+        got: String,
+    },
 
-    #[error("Invalid concentrated liquidity pool_id {0}")]
-    InvalidPoolId(u64),
+    #[error("Invalid duality liquidity pair_id {0:?}")]
+    InvalidPairId([String; 2]),
 
     #[error("Invalid delegate vault rebalancer address: {0}")]
     InvalidDelegateAddress(String),
@@ -47,7 +58,7 @@ pub enum InstantiationError {
     InvalidAdminFee { max: Uint128, got: Uint128 },
 
     #[error("The vault admin cant have any fee if the vault doesnt have any admin")]
-    AdminFeeWithoutAdmin { },
+    AdminFeeWithoutAdmin {},
 
     #[error("Contradiction: {reason}; Hint: {hint}")]
     ContradictoryConfig { reason: String, hint: String },
@@ -62,7 +73,11 @@ pub enum InstantiationError {
 #[derive(Error, Debug, PartialEq)]
 pub enum DepositError {
     #[error("The vault can only handle tokens {denom0} and {denom1}, but got: {unexpected}")]
-    ImproperTokensSent { denom0: String, denom1: String, unexpected: String },
+    ImproperTokensSent {
+        denom0: String,
+        denom1: String,
+        unexpected: String,
+    },
 
     #[error("Cant mint vault shares to itself ({0})")]
     ShareholderCantBeContract(String),
@@ -77,7 +92,10 @@ pub enum DepositError {
     DepositedAmountBelowMinLiquidity { min_liquidity: Uint128, got: String },
 
     #[error("The vault current proportion is: {current_vault_proportion}; got: {got}, which produces 0 shares")]
-    IndeterminateProportionDeposit { current_vault_proportion: String, got: String }
+    IndeterminateProportionDeposit {
+        current_vault_proportion: String,
+        got: String,
+    },
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -88,10 +106,14 @@ pub enum RebalanceError {
     #[error("Only the delegate address {delegate} can rebalance, tried to do so from {got}")]
     UnauthorizedDelegateAccount { delegate: String, got: String },
 
-    #[error("Rebalancing the same vault twice per block is not supported, wait for the next block")]
+    #[error(
+        "Rebalancing the same vault twice per block is not supported, wait for the next block"
+    )]
     CantRebalanceTwicePerBlock(),
 
-    #[error("Cant rebalance, price hasnt moved enough (price: {price}; movement_factor: {factor})")]
+    #[error(
+        "Cant rebalance, price hasnt moved enough (price: {price}; movement_factor: {factor})"
+    )]
     PriceHasntMovedEnough { price: Uint128, factor: Uint128 },
 
     #[error("Cant rebalance, the price {price} moved outside [{twap}*0.99, {twap}*1.01]")]
@@ -106,10 +128,14 @@ pub enum RebalanceError {
     #[error("You cant rebalance a vault without funds")]
     NothingToRebalance {},
 
-    #[error("Pool with id {0} is empty, and thus has no price")]
-    PoolWithoutPrice(u64),
-}
+    #[error("Pair with id {0} is empty, and thus has no price")]
+    PairWithoutPrice(String),
+    
+    #[error("Invalid deposit price: {0}")]
+    InvalidDepositPrice(PrecDec),
 
+    
+}
 
 #[derive(Error, Debug, PartialEq)]
 pub enum WithdrawalError {
@@ -118,7 +144,7 @@ pub enum WithdrawalError {
 
     #[error("Trying to withdraw to improper address {0}")]
     InvalidWithdrawalAddress(String),
-    
+
     #[error("Cant withdraw to itself ({0})")]
     CantWithdrawToContract(String),
 
@@ -126,7 +152,7 @@ pub enum WithdrawalError {
     InvalidWithdrawalAmount { owned: Uint128, withdrawn: Uint128 },
 
     #[error("Withdrawn amounts below min wanted amounts: got: {got}, wanted: {wanted}")]
-    WithdrawnAmontsBelowMin { got: String, wanted: String }
+    WithdrawnAmontsBelowMin { got: String, wanted: String },
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -141,7 +167,7 @@ pub enum ProtocolOperationError {
     NonRescuableDenom(String),
 
     #[error("Tried to rescue coins with non-existent denom {0}")]
-    InvalidDenom(String)
+    InvalidDenom(String),
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -158,7 +184,9 @@ pub enum AdminOperationError {
     #[error("There is no vault admin migration happening at this time")]
     NewProposedAdminIsNone(),
 
-    #[error("Only the new proposed admin {expected} can take control of the vault, but {got} tried to")]
+    #[error(
+        "Only the new proposed admin {expected} can take control of the vault, but {got} tried to"
+    )]
     UnauthorizedNewProposedAdmin { expected: String, got: String },
 
     // FIXME: `InstantiationError` has variants that will never happen here.
@@ -176,12 +204,11 @@ pub enum AdminOperationError {
     BurningAdminWithImproperRebalancer(),
 
     #[error("Cant burn admin if the vault has a proposed new admin")]
-    BurningAdminWithProposedNewAdmin()
+    BurningAdminWithProposedNewAdmin(),
 }
 
-
 #[derive(Error, Debug, PartialEq)]
-pub enum DexDepositError {
-    #[error("TODO : DELETE ME ")]
-    SomeError()
+pub enum DexError {
+    #[error("Cannot fetch price")]
+    CannotFetchPrice(),
 }

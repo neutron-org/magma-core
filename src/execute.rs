@@ -2,11 +2,15 @@ use core::panic;
 use std::str::FromStr;
 
 use cosmwasm_std::{
-    coin, coins, Addr, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg, Uint128
+    coin, coins, Addr, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
+    SubMsg, Uint128, Uint256,
 };
 use cw20_base::{
     contract::{execute_burn, execute_mint, query_balance, query_token_info},
     state::TOKEN_INFO,
+};
+use neutron_std::types::neutron::dex::{
+    DepositOptions, DexQuerier, MsgDeposit, QueryAllTickLiquidityResponse, TickLiquidity,
 };
 use osmosis_std::types::{
     cosmos::{
@@ -26,10 +30,11 @@ use neutron_std::types::cosmos::base::query::v1beta1::{
 
 use crate::{
     assert_approx_eq,
-    constants::{MIN_LIQUIDITY, POSITION_CREATION_SLIPPAGE, PROTOCOL_ADDR},
-    do_some,
+    constants::{MIN_LIQUIDITY, PROTOCOL_ADDR},
+    duality_helpers::{get_tick_index_for_liquidity, max_price, price_to_tick_index, sort_token_data_and_get_pair_id_str},
     error::{
-        AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError, DexDepositError
+        AdminOperationError, DepositError, ProtocolOperationError, RebalanceError,
+        WithdrawalError,
     },
     msg::{
         CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse,
@@ -41,7 +46,6 @@ use crate::{
         Weight, FEES_INFO, FUNDS_INFO, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE,
     },
     utils::{calc_x0, price_function_inv, raw},
-    duality_helpers::{get_tick_index_for_liquidity, sort_token_data_and_get_pair_id_str},
 };
 
 pub fn deposit(
@@ -59,7 +63,7 @@ pub fn deposit(
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let contract_addr = env.contract.address.clone();
 
-    let (denom0, denom1) = vault_info.denoms(&deps.querier);
+    let (denom0, denom1) = vault_info.denoms();
 
     let improper_funds: Vec<_> = info
         .funds
@@ -189,8 +193,10 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let mut vault_state = VAULT_STATE.load(deps.storage).unwrap();
 
-    let pool_id = vault_info.pool_id.clone();
-    let price = pool_id.price(&deps.querier);
+    let pair_id = vault_info.pair_id.clone();
+    let price = pair_id
+        .price0(&deps.querier)
+        .or_else(|_| Err(RebalanceError::PairWithoutPrice(pair_id.pair_id_str())))?;
 
     can_rebalance(deps, env.clone(), info)?;
 
@@ -217,7 +223,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     if price.is_zero() {
         // NOTE: If the pool has no price, we should be able to deposit 
         //       in any proportion. But we keep things simple for the v1.
-        return Err(PoolWithoutPrice(pool_id.0));
+        return Err(PairWithoutPrice(pair_id.pair_id_str()));
     }
 
     let (balanced_balance0, balanced_balance1) = {
@@ -299,8 +305,8 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     // the vault only holds tokens for limit orders for now, or that
     // the vault simply has zero `full_range_weight`.
     if !full_range_weight.is_zero() && !full_range_balance0.is_zero() {
-        let lower_tick = vault_info.min_valid_tick(&deps.querier);
-        let upper_tick = vault_info.max_valid_tick(&deps.querier);
+        let lower_tick = vault_info.min_valid_tick();
+        let upper_tick = vault_info.max_valid_tick();
 
         new_position_msgs.push(SubMsg::reply_on_success(
             create_position_msg(
@@ -320,10 +326,10 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     if !base_factor.is_one() && !base_range_balance0.is_zero() {
         // Invariant: `base_factor > 1`, thus wont panic.
         let lower_price = price.checked_div(base_factor.0).unwrap();
-        let upper_price = price.checked_mul(base_factor.0).unwrap_or(Decimal::MAX);
+        let upper_price = price.checked_mul(base_factor.0).unwrap_or(max_price());
 
-        let lower_tick = price_function_inv(&lower_price);
-        let upper_tick = price_function_inv(&upper_price);
+        let lower_tick = price_to_tick_index(&lower_price).unwrap();
+        let upper_tick = price_to_tick_index(&upper_price);
 
         new_position_msgs.push(SubMsg::reply_on_success(
             create_position_msg(
