@@ -2,7 +2,9 @@ use std::{cmp, str::FromStr};
 
 use cosmwasm_std::{Deps, Uint128, Uint256};
 use cw20_base::state::TOKEN_INFO;
-use osmosis_std::types::{cosmos::base::v1beta1::Coin, osmosis::concentratedliquidity::v1beta1::PositionByIdRequest};
+use osmosis_std::types::{
+    cosmos::base::v1beta1::Coin, osmosis::concentratedliquidity::v1beta1::PositionByIdRequest,
+};
 
 use crate::{
     constants::MIN_LIQUIDITY,
@@ -18,16 +20,17 @@ use crate::{
 /// - Idle protocol fees, not yet claimed nor commited to the state.
 /// - Idle vault admin fees, not yet claimed nor commited to the state.
 ///
-/// For this, query the fees and balances in all current vault positions and 
+/// For this, query the fees and balances in all current vault positions and
 /// funds tracked by [`FUNDS_INFO`] and [`FEES_INFO`].
 pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
-    let full_range_balances = position_balances_with_fees(PositionType::FullRange, deps);
-    let base_balances = position_balances_with_fees(PositionType::Base, deps);
-    let limit_balances = position_balances_with_fees(PositionType::Limit, deps);
+    let position_balance = position_balance(deps);
+    
 
     // Invariant: Any state will always be present after instantiation.
-    let FundsInfo { available_balance0, available_balance1 } = FUNDS_INFO
-        .load(deps.storage).unwrap();
+    let FundsInfo {
+        available_balance0,
+        available_balance1,
+    } = FUNDS_INFO.load(deps.storage).unwrap();
 
     let fees = FEES_INFO.load(deps.storage).unwrap();
 
@@ -37,7 +40,7 @@ pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
     //        addition of token amounts wont overflow, because for that the
     //        token supply of any token would have to be above `Uint128::MAX`.
     //        Products wont overflow, as we know the fees are valid weights.
-    do_me! { 
+    do_me! {
         let total_token0_fees = full_range_balances.bal0_fees
             .checked_add(base_balances.bal0_fees)?
             .checked_add(limit_balances.bal0_fees)?;
@@ -77,17 +80,17 @@ pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
             .checked_add(total_token1_fees)?
             .checked_sub(protocol_unclaimed_fees1)?
             .checked_sub(admin_unclaimed_fees1)?;
-        
-        VaultBalancesResponse { 
+
+        VaultBalancesResponse {
             bal0, bal1,
             protocol_unclaimed_fees0, protocol_unclaimed_fees1,
             admin_unclaimed_fees0, admin_unclaimed_fees1
         }
-    }.unwrap()
+    }
+    .unwrap()
 }
 
-pub fn position_balances_with_fees(
-    position_type: PositionType,
+pub fn position_balance(
     deps: Deps,
 ) -> PositionBalancesWithFeesResponse {
     do_me! {
@@ -113,7 +116,7 @@ pub fn position_balances_with_fees(
         let incentive_rewards = pos.claimable_incentives;
 
         {
-            let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms(&deps.querier);
+            let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms();
             // Invariant: `VAULT_INFO` will always be present after instantiation.
             assert!(denom0 == asset0.denom && denom1 == asset1.denom);
             // Invariant: If `pos` is a valid position, it will always have a `position_id`.
@@ -122,7 +125,7 @@ pub fn position_balances_with_fees(
 
         // Invariant: Will never panic, because if the position has amounts
         //            `amount0` and `amount1`, we know theyre valid `Uint128`s.
-        // NOTE: We subtract 1 to prevent dust error during withdrawals, as 
+        // NOTE: We subtract 1 to prevent dust error during withdrawals, as
         //       position withdrawals can leave 1 atomic token behind.
         let bal0 = Uint128::from_str(&asset0.amount)?
             .checked_sub(Uint128::one())
@@ -139,7 +142,7 @@ pub fn position_balances_with_fees(
             .unwrap_or(Ok(Uint128::zero()));
 
         // Invariant: If `spread_rewards` or `incentive_rewards` is present, we know
-        //            its a `Vec` of valid amounts, so the conversions to `Uint128`s 
+        //            its a `Vec` of valid amounts, so the conversions to `Uint128`s
         //            will never fail.
         let spread_rewards0 = extract_amount(&spread_rewards, &asset0.denom)?;
         let spread_rewards1 = extract_amount(&spread_rewards, &asset1.denom)?;
@@ -152,22 +155,27 @@ pub fn position_balances_with_fees(
         let bal1_fees = spread_rewards1.checked_add(incentive_rewards1)?;
 
         PositionBalancesWithFeesResponse { bal0, bal1, bal0_fees, bal1_fees }
-    }.unwrap()
+    }
+    .unwrap()
 }
 
 /// # Arguments
 ///
-/// * `input_amount0` - Amount of token0 for which we want to calculate shares for, 
+/// * `input_amount0` - Amount of token0 for which we want to calculate shares for,
 ///                     not yet in the contract state ([`FUNDS_INFO`]).
 ///
-/// * `input_amount1` - Amount of token1 for which we want to calculate shares for, 
+/// * `input_amount1` - Amount of token1 for which we want to calculate shares for,
 ///                     not yet in the contract state ([`FUNDS_INFO`]).
 pub fn calc_shares_and_usable_amounts(
     input_amount0: Uint128,
     input_amount1: Uint128,
-    deps: Deps
+    deps: Deps,
 ) -> CalcSharesAndUsableAmountsResponse {
-    let VaultBalancesResponse { bal0: total0, bal1: total1, .. } = vault_balances(deps);
+    let VaultBalancesResponse {
+        bal0: total0,
+        bal1: total1,
+        ..
+    } = vault_balances(deps);
 
     // Invariant: `TOKEN_INFO` always present after instantiation.
     let total_supply = TOKEN_INFO.load(deps.storage).unwrap().total_supply;
@@ -177,7 +185,8 @@ pub fn calc_shares_and_usable_amounts(
         // Invariant: Wont overflow. See [`DepositError::DepositedAmountBelowMinLiquidity`].
         CalcSharesAndUsableAmountsResponse {
             shares: cmp::max(input_amount0, input_amount1)
-                .checked_sub(MIN_LIQUIDITY).unwrap(),
+                .checked_sub(MIN_LIQUIDITY)
+                .unwrap(),
             usable_amount0: input_amount0,
             usable_amount1: input_amount1,
         }
@@ -189,16 +198,16 @@ pub fn calc_shares_and_usable_amounts(
 
         // Invariant: The multiplication wont overflow becuase we
         //            lifted the amount to `Uint256`. The division
-        //            wont panic, becuase we know from above that 
+        //            wont panic, becuase we know from above that
         //            `total1` is not zero. The downgrade back to
         //            `Uint128` wont fail because we divided
         //            proportionally by `total1`. The same
         //            reasoning applies to the rest of branches.
         let shares = do_ok!(Uint256::from(input_amount1)
-           .checked_mul(total_supply.into())?
-           .checked_div(total1.into())?
-           .try_into()?
-        ).unwrap();
+            .checked_mul(total_supply.into())?
+            .checked_div(total1.into())?
+            .try_into()?)
+        .unwrap();
 
         CalcSharesAndUsableAmountsResponse {
             shares,
@@ -214,8 +223,8 @@ pub fn calc_shares_and_usable_amounts(
         let shares = do_ok!(Uint256::from(input_amount0)
             .checked_mul(total_supply.into())?
             .checked_div(total0.into())?
-            .try_into()?
-        ).unwrap();
+            .try_into()?)
+        .unwrap();
 
         CalcSharesAndUsableAmountsResponse {
             shares,
@@ -261,7 +270,7 @@ pub fn calc_shares_and_usable_amounts(
                 usable_amount0,
                 usable_amount1,
             }
-        }.unwrap()
+        }
+        .unwrap()
     }
 }
-

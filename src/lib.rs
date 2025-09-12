@@ -1,10 +1,10 @@
+pub mod constants;
 pub mod contract;
-pub mod msg;
-pub mod state;
+pub mod duality_helpers;
 pub mod error;
 pub mod execute;
-pub mod query;
-pub mod utils;
-pub mod constants;
 pub mod mock;
-pub mod duality_helpers;
+pub mod msg;
+pub mod query;
+pub mod state;
+pub mod utils;

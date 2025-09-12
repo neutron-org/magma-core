@@ -1,6 +1,7 @@
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod mock {
     use anyhow::Result;
+    use neutron_std::types::neutron::util::precdec::PrecDec;
     use std::str::FromStr;
 
     use cosmwasm_std::{testing::mock_dependencies, Addr, Api, Coin, Decimal, Uint128};
@@ -16,41 +17,43 @@ pub mod mock {
             poolmanager::v1beta1::{MsgSwapExactAmountIn, SwapAmountInRoute},
         },
     };
-    use osmosis_test_tube::{
-        Account, Bank, ConcentratedLiquidity, ExecuteResponse, GovWithAppAccess, Module,
-        OsmosisTestApp, PoolManager, SigningAccount, Wasm,
+    use neutron_test_tube::{
+        Account, Bank, ExecuteResponse, GovWithAppAccess, Module,
+        NeutronTestApp, SigningAccount, Wasm,
     };
 
     use crate::{
-        constants::{MAX_TICK, MIN_TICK, TWAP_SECONDS, VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM},
+        constants::{
+            MAX_TICK, MIN_TICK, TWAP_SECONDS, VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM,
+        },
         msg::{
-            CalcSharesAndUsableAmountsResponse, DepositMsg, ExecuteMsg, InstantiateMsg, PositionBalancesWithFeesResponse, QueryMsg, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg, WithdrawMsg
+            CalcSharesAndUsableAmountsResponse, DepositMsg, ExecuteMsg, InstantiateMsg,
+            PositionBalancesWithFeesResponse, QueryMsg, VaultBalancesResponse,
+            VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg,
+            WithdrawMsg,
         },
-        state::{
-            FeesInfo, PositionType, ProtocolFee, VaultParameters, VaultState,
-        },
+        state::{FeesInfo, PositionType, ProtocolFee, VaultParameters, VaultState},
     };
 
     // TODO: Ideally abstract those 2, so the tests dev doesnt has to keep
     // track of whats in the pool.
     pub const USDC_DENOM: &str = VAULT_CREATION_COST_DENOM;
     pub const OSMO_DENOM: &str = "uosmo";
-    
+
     pub struct PoolMockup {
         pub pool_id: u64,
         pub initial_position_id: u64,
-        pub app: OsmosisTestApp,
+        pub app: NeutronTestApp,
         pub deployer: SigningAccount,
         pub user1: SigningAccount,
         pub user2: SigningAccount,
-        pub price: Decimal,
+        pub price: PrecDec,
     }
 
     impl PoolMockup {
         pub fn new_with_spread(usdc_in: u128, osmo_in: u128, spread_factor: &str) -> Self {
-            
-            let app = OsmosisTestApp::new();
-            
+            let app = NeutronTestApp::new();
+
             let init_coins = &[
                 Coin::new(1_000_000_000_000_000u128, USDC_DENOM),
                 Coin::new(1_000_000_000_000_000u128, OSMO_DENOM),
@@ -61,26 +64,6 @@ pub mod mock {
             let user1 = accounts.next().unwrap();
             let user2 = accounts.next().unwrap();
 
-            let cl = ConcentratedLiquidity::new(&app);
-            let gov = GovWithAppAccess::new(&app);
-
-            // Pool setup.
-            gov.propose_and_execute(
-                CreateConcentratedLiquidityPoolsProposal::TYPE_URL.to_string(),
-                CreateConcentratedLiquidityPoolsProposal {
-                    title: "Create cl uosmo:usdc pool".into(),
-                    description: "blabla".into(),
-                    pool_records: vec![PoolRecord {
-                        denom0: USDC_DENOM.into(),
-                        denom1: OSMO_DENOM.into(),
-                        tick_spacing: 30,
-                        spread_factor: Decimal::from_str(spread_factor).unwrap().atomics().into()
-                    }]
-                },
-                deployer.address(),
-                &deployer,
-            )
-            .unwrap();
 
             // NOTE: Could fail if we test multiple pools/positions.
             let pool_id = 1;
@@ -97,8 +80,8 @@ pub mod mock {
                             Coin::new(usdc_in, USDC_DENOM).into(),
                             Coin::new(osmo_in, OSMO_DENOM).into(),
                         ],
-                        token_min_amount0: ((usdc_in*99999)/100000).to_string(),
-                        token_min_amount1: ((osmo_in*99999)/100000).to_string(),
+                        token_min_amount0: ((usdc_in * 99999) / 100000).to_string(),
+                        token_min_amount1: ((osmo_in * 99999) / 100000).to_string(),
                     },
                     &deployer,
                 )
@@ -109,12 +92,17 @@ pub mod mock {
             assert_eq!(position_res.position_id, 1);
             app.increase_time(TWAP_SECONDS);
 
-            let price = Decimal::new(osmo_in.into()) / Decimal::new(usdc_in.into());
+            let price = PrecDec::new(osmo_in.into()) / PrecDec::new(usdc_in.into());
 
             Self {
-                pool_id, initial_position_id, app, deployer, user1, user2, price
+                pool_id,
+                initial_position_id,
+                app,
+                deployer,
+                user1,
+                user2,
+                price,
             }
-            
         }
 
         pub fn new(usdc_in: u128, osmo_in: u128) -> Self {
@@ -123,18 +111,19 @@ pub mod mock {
 
         pub fn swap_osmo_for_usdc(&self, from: &SigningAccount, osmo_in: u128) -> Result<Uint128> {
             let pm = PoolManager::new(&self.app);
-            let usdc_got = pm.swap_exact_amount_in(
-                MsgSwapExactAmountIn {
-                    sender: from.address(),
-                    routes: vec![SwapAmountInRoute {
-                        pool_id: self.pool_id,
-                        token_out_denom: USDC_DENOM.into(),
-                    }],
-                    token_in: Some(Coin::new(osmo_in, OSMO_DENOM).into()),
-                    token_out_min_amount: "1".into(),
-                },
-                from
-            )
+            let usdc_got = pm
+                .swap_exact_amount_in(
+                    MsgSwapExactAmountIn {
+                        sender: from.address(),
+                        routes: vec![SwapAmountInRoute {
+                            pool_id: self.pool_id,
+                            token_out_denom: USDC_DENOM.into(),
+                        }],
+                        token_in: Some(Coin::new(osmo_in, OSMO_DENOM).into()),
+                        token_out_min_amount: "1".into(),
+                    },
+                    from,
+                )
                 .map(|x| x.data.token_out_amount)
                 .map(|amount| Uint128::from_str(&amount).unwrap());
 
@@ -143,18 +132,19 @@ pub mod mock {
 
         pub fn swap_usdc_for_osmo(&self, from: &SigningAccount, usdc_in: u128) -> Result<Uint128> {
             let pm = PoolManager::new(&self.app);
-            let usdc_got = pm.swap_exact_amount_in(
-                MsgSwapExactAmountIn {
-                    sender: from.address(),
-                    routes: vec![SwapAmountInRoute {
-                        pool_id: self.pool_id,
-                        token_out_denom: OSMO_DENOM.into(),
-                    }],
-                    token_in: Some(Coin::new(usdc_in, USDC_DENOM).into()),
-                    token_out_min_amount: "1".into(),
-                },
-                from
-            )
+            let usdc_got = pm
+                .swap_exact_amount_in(
+                    MsgSwapExactAmountIn {
+                        sender: from.address(),
+                        routes: vec![SwapAmountInRoute {
+                            pool_id: self.pool_id,
+                            token_out_denom: OSMO_DENOM.into(),
+                        }],
+                        token_in: Some(Coin::new(usdc_in, USDC_DENOM).into()),
+                        token_out_min_amount: "1".into(),
+                    },
+                    from,
+                )
                 .map(|x| x.data.token_out_amount)
                 .map(|amount| Uint128::from_str(&amount).unwrap());
 
@@ -163,19 +153,29 @@ pub mod mock {
 
         pub fn osmo_balance_query<T: ToString>(&self, address: T) -> Uint128 {
             let bank = Bank::new(&self.app);
-            let amount = bank.query_balance(&QueryBalanceRequest {
-                address: address.to_string(),
-                denom: OSMO_DENOM.into()
-            }).unwrap().balance.unwrap().amount;
+            let amount = bank
+                .query_balance(&QueryBalanceRequest {
+                    address: address.to_string(),
+                    denom: OSMO_DENOM.into(),
+                })
+                .unwrap()
+                .balance
+                .unwrap()
+                .amount;
             Uint128::from_str(&amount).unwrap()
         }
 
         pub fn usdc_balance_query<T: ToString>(&self, address: T) -> Uint128 {
             let bank = Bank::new(&self.app);
-            let amount = bank.query_balance(&QueryBalanceRequest {
-                address: address.to_string(),
-                denom: USDC_DENOM.into()
-            }).unwrap().balance.unwrap().amount;
+            let amount = bank
+                .query_balance(&QueryBalanceRequest {
+                    address: address.to_string(),
+                    denom: USDC_DENOM.into(),
+                })
+                .unwrap()
+                .balance
+                .unwrap()
+                .amount;
             Uint128::from_str(&amount).unwrap()
         }
 
@@ -187,7 +187,8 @@ pub mod mock {
 
         pub fn position_liquidity(&self, position_id: u64) -> Result<Decimal> {
             let pos = self.position_query(position_id)?;
-            let liq = pos.position
+            let liq = pos
+                .position
                 .map(|x| Uint128::from_str(&x.liquidity))
                 .expect("oops")
                 .map(|x| Decimal::raw(x.u128()))?;
@@ -195,10 +196,9 @@ pub mod mock {
         }
     }
 
-    pub fn store_vaults_code(wasm: &Wasm<OsmosisTestApp>, deployer: &SigningAccount) -> u64 {
-        let contract_bytecode = std::fs::read(
-            "target/wasm32-unknown-unknown/release/magma_core.wasm"
-        ).unwrap();
+    pub fn store_vaults_code(wasm: &Wasm<NeutronTestApp>, deployer: &SigningAccount) -> u64 {
+        let contract_bytecode =
+            std::fs::read("target/wasm32-unknown-unknown/release/magma_core.wasm").unwrap();
 
         wasm.store_code(&contract_bytecode, None, deployer)
             .unwrap()
@@ -214,47 +214,64 @@ pub mod mock {
         }
     }
 
-    pub fn rebalancer_anyone(price_factor_before_rebalance: &str, seconds_before_rebalance: u32) -> VaultRebalancerInstantiateMsg {
-        VaultRebalancerInstantiateMsg::Anyone { 
-            price_factor_before_rebalance: Decimal::from_str(price_factor_before_rebalance).unwrap().atomics(),
-            seconds_before_rebalance
+    pub fn rebalancer_anyone(
+        price_factor_before_rebalance: &str,
+        seconds_before_rebalance: u32,
+    ) -> VaultRebalancerInstantiateMsg {
+        VaultRebalancerInstantiateMsg::Anyone {
+            price_factor_before_rebalance: Decimal::from_str(price_factor_before_rebalance)
+                .unwrap()
+                .atomics(),
+            seconds_before_rebalance,
         }
     }
 
     pub fn deposit_msg<T: ToString>(to: T) -> ExecuteMsg {
-        ExecuteMsg::Deposit(DepositMsg { 
+        ExecuteMsg::Deposit(DepositMsg {
             amount0_min: Uint128::zero(),
             amount1_min: Uint128::zero(),
-            to: to.to_string()
+            to: to.to_string(),
         })
     }
 
     pub struct VaultMockup<'a> {
         pub vault_addr: Addr,
-        pub wasm: Wasm<'a, OsmosisTestApp>
+        pub wasm: Wasm<'a, NeutronTestApp>,
     }
 
     impl VaultMockup<'_> {
         pub fn new(pool_info: &PoolMockup, params: VaultParametersInstantiateMsg) -> VaultMockup {
-            Self::try_new_with_rebalancer(pool_info, params, VaultRebalancerInstantiateMsg::Admin {}).unwrap()
+            Self::try_new_with_rebalancer(
+                pool_info,
+                params,
+                VaultRebalancerInstantiateMsg::Admin {},
+            )
+            .unwrap()
         }
 
         pub fn new_with_rebalancer(
             pool_info: &PoolMockup,
             params: VaultParametersInstantiateMsg,
-            rebalancer: VaultRebalancerInstantiateMsg
+            rebalancer: VaultRebalancerInstantiateMsg,
         ) -> VaultMockup {
             Self::try_new_with_rebalancer(pool_info, params, rebalancer).unwrap()
         }
 
-        pub fn try_new(pool_info: &PoolMockup, params: VaultParametersInstantiateMsg) -> Result<VaultMockup> {
-            Self::try_new_with_rebalancer(pool_info, params, VaultRebalancerInstantiateMsg::Admin {})
+        pub fn try_new(
+            pool_info: &PoolMockup,
+            params: VaultParametersInstantiateMsg,
+        ) -> Result<VaultMockup> {
+            Self::try_new_with_rebalancer(
+                pool_info,
+                params,
+                VaultRebalancerInstantiateMsg::Admin {},
+            )
         }
 
         pub fn try_new_with_rebalancer(
             pool_info: &PoolMockup,
             params: VaultParametersInstantiateMsg,
-            rebalancer: VaultRebalancerInstantiateMsg
+            rebalancer: VaultRebalancerInstantiateMsg,
         ) -> Result<VaultMockup> {
             let wasm = Wasm::new(&pool_info.app);
             let code_id = store_vaults_code(&wasm, &pool_info.deployer);
@@ -266,12 +283,12 @@ pub mod mock {
                     code_id,
                     &InstantiateMsg {
                         vault_info: VaultInfoInstantiateMsg {
-                            pool_id: pool_info.pool_id,
+                            pair_id: pool_info.pool_id,
                             vault_name: "My USDC/OSMO vault".into(),
                             vault_symbol: "USDCOSMOV".into(),
                             admin: Some(pool_info.deployer.address()),
-                            admin_fee: ProtocolFee::default().0.0.atomics(),
-                            rebalancer
+                            admin_fee: ProtocolFee::default().0 .0.atomics(),
+                            rebalancer,
                         },
                         vault_parameters: params,
                     },
@@ -292,7 +309,7 @@ pub mod mock {
             &self,
             usdc: u128,
             osmo: u128,
-            from: &SigningAccount
+            from: &SigningAccount,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             let (amount0, amount1) = (usdc, osmo);
 
@@ -303,42 +320,39 @@ pub mod mock {
             if amount0 == 0 && amount1 == 0 {
                 unimplemented!()
             } else if amount0 == 0 {
-                Ok(self.wasm.execute(
-                    self.vault_addr.as_ref(),
-                    execute_msg,
-                    &[coin1],
-                    from
-                )?)
+                Ok(self
+                    .wasm
+                    .execute(self.vault_addr.as_ref(), execute_msg, &[coin1], from)?)
             } else if amount1 == 0 {
-                Ok(self.wasm.execute(
-                    self.vault_addr.as_ref(),
-                    execute_msg,
-                    &[coin0],
-                    from
-                )?)
+                Ok(self
+                    .wasm
+                    .execute(self.vault_addr.as_ref(), execute_msg, &[coin0], from)?)
             } else {
                 Ok(self.wasm.execute(
                     self.vault_addr.as_ref(),
                     execute_msg,
                     &[coin0, coin1],
-                    from
+                    from,
                 )?)
             }
         }
 
         pub fn rebalance(
             &self,
-            from: &SigningAccount
+            from: &SigningAccount,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
-                self.vault_addr.as_ref(), &ExecuteMsg::Rebalance {}, &[], from
+                self.vault_addr.as_ref(),
+                &ExecuteMsg::Rebalance {},
+                &[],
+                from,
             )?)
         }
 
         pub fn withdraw(
             &self,
             shares: Uint128,
-            from: &SigningAccount
+            from: &SigningAccount,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
@@ -346,172 +360,186 @@ pub mod mock {
                     shares,
                     amount0_min: Uint128::zero(),
                     amount1_min: Uint128::zero(),
-                    to: from.address()
+                    to: from.address(),
                 }),
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn admin_withdraw(
             &self,
-            from: &SigningAccount
+            from: &SigningAccount,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
                 &ExecuteMsg::WithdrawAdminFees {},
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn protocol_withdraw(
             &self,
-            from: &SigningAccount
+            from: &SigningAccount,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
                 &ExecuteMsg::WithdrawProtocolFees {},
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn propose_new_admin(
             &self,
             from: &SigningAccount,
-            new: Option<&SigningAccount>
+            new: Option<&SigningAccount>,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
-                &ExecuteMsg::ProposeNewAdmin { new_admin: new.map(|x| x.address()) },
+                &ExecuteMsg::ProposeNewAdmin {
+                    new_admin: new.map(|x| x.address()),
+                },
                 &[],
-                from
+                from,
             )?)
         }
-        
+
         pub fn accept_new_admin(
             &self,
-            from: &SigningAccount
+            from: &SigningAccount,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
                 &ExecuteMsg::AcceptNewAdmin {},
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn burn_vault_admin(
             &self,
-            from: &SigningAccount
+            from: &SigningAccount,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
                 &ExecuteMsg::BurnVaultAdmin {},
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn change_vault_rebalancer(
             &self,
             from: &SigningAccount,
-            new_rebalancer: VaultRebalancerInstantiateMsg
+            new_rebalancer: VaultRebalancerInstantiateMsg,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
                 &ExecuteMsg::ChangeVaultRebalancer(new_rebalancer),
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn change_vault_parameters(
             &self,
             from: &SigningAccount,
-            new_paramerers: VaultParametersInstantiateMsg
+            new_paramerers: VaultParametersInstantiateMsg,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
                 &ExecuteMsg::ChangeVaultParameters(new_paramerers),
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn change_admin_fee(
             &self,
             from: &SigningAccount,
-            new_fee: &str
+            new_fee: &str,
         ) -> Result<ExecuteResponse<MsgExecuteContractResponse>> {
             Ok(self.wasm.execute(
                 self.vault_addr.as_ref(),
-                &ExecuteMsg::ChangeAdminFee { new_admin_fee: Decimal::from_str(new_fee).unwrap().atomics() },
+                &ExecuteMsg::ChangeAdminFee {
+                    new_admin_fee: Decimal::from_str(new_fee).unwrap().atomics(),
+                },
                 &[],
-                from
+                from,
             )?)
         }
 
         pub fn vault_balances_query(&self) -> VaultBalancesResponse {
-            self.wasm.query(
-                self.vault_addr.as_ref(),
-                &QueryMsg::VaultBalances { }
-            ).unwrap()
+            self.wasm
+                .query(self.vault_addr.as_ref(), &QueryMsg::VaultBalances {})
+                .unwrap()
         }
 
-        pub fn position_balances_query(&self, position_type: PositionType) -> PositionBalancesWithFeesResponse {
-            self.wasm.query(
-                self.vault_addr.as_ref(),
-                &QueryMsg::PositionBalancesWithFees { position_type },
-            ).unwrap()
+        pub fn position_balances_query(
+            &self,
+            position_type: PositionType,
+        ) -> PositionBalancesWithFeesResponse {
+            self.wasm
+                .query(
+                    self.vault_addr.as_ref(),
+                    &QueryMsg::PositionBalancesWithFees { position_type },
+                )
+                .unwrap()
         }
 
         pub fn token_info_query(&self) -> TokenInfo {
-            self.wasm.query(
-                self.vault_addr.as_ref(),
-                &QueryMsg::TokenInfo {  }
-            ).unwrap()
+            self.wasm
+                .query(self.vault_addr.as_ref(), &QueryMsg::TokenInfo {})
+                .unwrap()
         }
 
         pub fn shares_query(&self, address: &str) -> Uint128 {
-            let res: cw20::BalanceResponse = self.wasm.query(
-                self.vault_addr.as_ref(),
-                &QueryMsg::Balance { address: address.into() }
-            ).unwrap();
+            let res: cw20::BalanceResponse = self
+                .wasm
+                .query(
+                    self.vault_addr.as_ref(),
+                    &QueryMsg::Balance {
+                        address: address.into(),
+                    },
+                )
+                .unwrap();
             res.balance
         }
 
         pub fn vault_state_query(&self) -> VaultState {
-            self.wasm.query(
-                self.vault_addr.as_ref(),
-                &QueryMsg::VaultState {}
-            ).unwrap()
+            self.wasm
+                .query(self.vault_addr.as_ref(), &QueryMsg::VaultState {})
+                .unwrap()
         }
 
         pub fn vault_parameters_query(&self) -> VaultParameters {
-            self.wasm.query(
-                self.vault_addr.as_ref(),
-                &QueryMsg::VaultParameters {}
-            ).unwrap()
+            self.wasm
+                .query(self.vault_addr.as_ref(), &QueryMsg::VaultParameters {})
+                .unwrap()
         }
 
         pub fn vault_fees_query(&self) -> FeesInfo {
-            self.wasm.query(
-                self.vault_addr.as_ref(),
-                &QueryMsg::FeesInfo {}
-            ).unwrap()
+            self.wasm
+                .query(self.vault_addr.as_ref(), &QueryMsg::FeesInfo {})
+                .unwrap()
         }
 
-        pub fn shares_and_usable_amounts_query(&self, usdc: u128, osmo: u128) -> CalcSharesAndUsableAmountsResponse {
-            self.wasm.query(
-                self.vault_addr.as_ref(), 
-                &QueryMsg::CalcSharesAndUsableAmounts { 
-                    for_amount0: Uint128::new(usdc), 
-                    for_amount1: Uint128::new(osmo)
-                }
-            ).unwrap()
+        pub fn shares_and_usable_amounts_query(
+            &self,
+            usdc: u128,
+            osmo: u128,
+        ) -> CalcSharesAndUsableAmountsResponse {
+            self.wasm
+                .query(
+                    self.vault_addr.as_ref(),
+                    &QueryMsg::CalcSharesAndUsableAmounts {
+                        for_amount0: Uint128::new(usdc),
+                        for_amount1: Uint128::new(osmo),
+                    },
+                )
+                .unwrap()
         }
-
     }
 }

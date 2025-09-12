@@ -1,5 +1,5 @@
 use cosmwasm_std::{
-    entry_point, to_json_binary, BankMsg, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdResult, Uint128, coins
+    entry_point, to_json_binary, BankMsg, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult, Uint128, coins
 };
 use cw20_base::allowances::{
     execute_burn_from, execute_decrease_allowance, execute_increase_allowance, execute_send_from,
@@ -9,7 +9,7 @@ use cw20_base::contract::{
     execute_burn, execute_send, execute_transfer, query_balance, query_token_info,
 };
 use cw20_base::state::{MinterData, TokenInfo, TOKEN_INFO};
-use osmosis_std::types::osmosis::concentratedliquidity::v1beta1::MsgCreatePositionResponse;
+
 
 use crate::constants::{PROTOCOL_ADDR, VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM};
 use crate::error::InstantiationError;
@@ -136,25 +136,26 @@ pub fn execute(
     }
 }
 
-#[entry_point]
-pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractError> {
-    // Invariant: We only use position creation submessages.
-    let new_position: MsgCreatePositionResponse = msg.result.try_into().unwrap();
-    // Invariant: Any state will always be present after instantiation.
-    let mut vault_state = VAULT_STATE.load(deps.storage).unwrap();
+// TODO: delete me
+// #[entry_point]
+// pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractError> {
+//     // Invariant: We only use position creation submessages.
+//     let new_position: MsgCreatePositionResponse = msg.result.try_into().unwrap();
+//     // Invariant: Any state will always be present after instantiation.
+//     let mut vault_state = VAULT_STATE.load(deps.storage).unwrap();
 
-    match msg.id {
-        0 => vault_state.full_range_position_id = Some(new_position.position_id),
-        1 => vault_state.base_position_id = Some(new_position.position_id),
-        2 => vault_state.limit_position_id = Some(new_position.position_id),
-        _ => unreachable!() // Invariant: We only use ids 0, 1 and 2.
-    };
+//     match msg.id {
+//         0 => vault_state.full_range_position_id = Some(new_position.position_id),
+//         1 => vault_state.base_position_id = Some(new_position.position_id),
+//         2 => vault_state.limit_position_id = Some(new_position.position_id),
+//         _ => unreachable!() // Invariant: We only use ids 0, 1 and 2.
+//     };
 
-    // Invariant: Wont panic as all types are proper.
-    VAULT_STATE.save(deps.storage, &vault_state).unwrap();
+//     // Invariant: Wont panic as all types are proper.
+//     VAULT_STATE.save(deps.storage, &vault_state).unwrap();
 
-    Ok(Response::new())
-}
+//     Ok(Response::new())
+// }
 
 #[cfg(test)]
 pub mod test {
@@ -175,7 +176,8 @@ pub mod test {
 
     use super::*;
     use cosmwasm_std::{coin, testing::mock_dependencies, Addr, Api, Coin, Decimal};
-    use osmosis_test_tube::Account;
+    use neutron_test_tube::Account;
+    use neutron_std::types::neutron::util::precdec::PrecDec;
 
     #[test]
     fn price_function_inv_test() {
@@ -843,7 +845,7 @@ pub mod test {
 
         let liquidity = full_range_liquidity + limit_liquidity;
         let delta_x = liquidity * (
-            Decimal::one()/target_price.sqrt() - Decimal::one()/pool_mockup.price.sqrt()
+            PrecDec::one()/target_price.sqrt() - PrecDec::one()/pool_mockup.price.sqrt()
         );
         let delta_x = delta_x.to_uint_floor();
 

@@ -1,7 +1,7 @@
+use crate::state::{FeesInfo, PositionType, VaultInfo, VaultParameters, VaultState};
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Binary, Uint128};
 use cw20::{AllowanceResponse, BalanceResponse, Expiration, TokenInfoResponse};
-use crate::state::{FeesInfo, PositionType, VaultInfo, VaultParameters, VaultState};
 
 #[cw_serde]
 pub struct VaultParametersInstantiateMsg {
@@ -15,7 +15,7 @@ pub struct VaultParametersInstantiateMsg {
 
 #[cw_serde]
 pub struct VaultInfoInstantiateMsg {
-    pub pool_id: u64,
+    pub pair_id: [String; 2],
     pub vault_name: String,
     pub vault_symbol: String,
     pub admin: Option<String>,
@@ -34,25 +34,25 @@ pub enum VaultRebalancerInstantiateMsg {
     /// doesnt has an admin. In that case, the specified parameters will
     /// determine if a rebalance is possible.
     Anyone {
-        /// 18 decimal places [`PriceFactor`]. Anyone will only be able to 
+        /// 18 decimal places [`PriceFactor`]. Anyone will only be able to
         /// rebalance if the price has moved this factor since the last rebalance.
         price_factor_before_rebalance: Uint128,
         /// Anyone can only rebalance if this time has passed since the last rebalace.
-        seconds_before_rebalance: u32
-    }
+        seconds_before_rebalance: u32,
+    },
 }
 
 #[cw_serde]
 pub struct InstantiateMsg {
     pub vault_info: VaultInfoInstantiateMsg,
-    pub vault_parameters: VaultParametersInstantiateMsg
+    pub vault_parameters: VaultParametersInstantiateMsg,
 }
 
 #[cw_serde]
 pub struct DepositMsg {
     pub amount0_min: Uint128,
     pub amount1_min: Uint128,
-    pub to: String // Addr to mint shares to.
+    pub to: String, // Addr to mint shares to.
 }
 
 #[cw_serde]
@@ -60,7 +60,7 @@ pub struct WithdrawMsg {
     pub shares: Uint128,
     pub amount0_min: Uint128,
     pub amount1_min: Uint128,
-    pub to: String
+    pub to: String,
 }
 
 #[cw_serde]
@@ -73,37 +73,77 @@ pub enum ExecuteMsg {
     // Admin/Protocol operations.
     WithdrawProtocolFees {},
     WithdrawAdminFees {},
-    ProposeNewAdmin { new_admin: Option<String> },
+    ProposeNewAdmin {
+        new_admin: Option<String>,
+    },
     AcceptNewAdmin {},
     BurnVaultAdmin {},
     ChangeVaultRebalancer(VaultRebalancerInstantiateMsg),
     ChangeVaultParameters(VaultParametersInstantiateMsg),
-    ChangeAdminFee { new_admin_fee: Uint128 },
-    ChangeProtocolFee { new_protocol_fee: Uint128 },
-    RescueIncentives { incentive_denom: String },
+    ChangeAdminFee {
+        new_admin_fee: Uint128,
+    },
+    ChangeProtocolFee {
+        new_protocol_fee: Uint128,
+    },
+    RescueIncentives {
+        incentive_denom: String,
+    },
 
     // Cw20 Realization.
-    Transfer { recipient: String, amount: Uint128 },
-    Burn { amount: Uint128 },
-    Send { contract: String, amount: Uint128, msg: Binary },
-    IncreaseAllowance { spender: String, amount: Uint128, expires: Option<Expiration> },
-    DecreaseAllowance { spender: String, amount: Uint128, expires: Option<Expiration> },
-    TransferFrom { owner: String, recipient: String, amount: Uint128 },
-    SendFrom { owner: String, contract: String, amount: Uint128, msg: Binary },
-    BurnFrom { owner: String, amount: Uint128 },
+    Transfer {
+        recipient: String,
+        amount: Uint128,
+    },
+    Burn {
+        amount: Uint128,
+    },
+    Send {
+        contract: String,
+        amount: Uint128,
+        msg: Binary,
+    },
+    IncreaseAllowance {
+        spender: String,
+        amount: Uint128,
+        expires: Option<Expiration>,
+    },
+    DecreaseAllowance {
+        spender: String,
+        amount: Uint128,
+        expires: Option<Expiration>,
+    },
+    TransferFrom {
+        owner: String,
+        recipient: String,
+        amount: Uint128,
+    },
+    SendFrom {
+        owner: String,
+        contract: String,
+        amount: Uint128,
+        msg: Binary,
+    },
+    BurnFrom {
+        owner: String,
+        amount: Uint128,
+    },
 }
 
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
-    /// All value held by the vault, including balances in the contract, 
+    /// All value held by the vault, including balances in the contract,
     /// balances in positions, and uncollected fees.
     #[returns(VaultBalancesResponse)]
     VaultBalances {},
     #[returns(PositionBalancesWithFeesResponse)]
     PositionBalancesWithFees { position_type: PositionType },
     #[returns(CalcSharesAndUsableAmountsResponse)]
-    CalcSharesAndUsableAmounts { for_amount0: Uint128, for_amount1: Uint128 },
+    CalcSharesAndUsableAmounts {
+        for_amount0: Uint128,
+        for_amount1: Uint128,
+    },
     #[returns(BalanceResponse)]
     Balance { address: String },
     #[returns(AllowanceResponse)]
@@ -117,7 +157,7 @@ pub enum QueryMsg {
     #[returns(VaultInfo)]
     VaultInfo {},
     #[returns(FeesInfo)]
-    FeesInfo {}
+    FeesInfo {},
 }
 
 #[cw_serde]
@@ -146,6 +186,5 @@ pub struct PositionBalancesWithFeesResponse {
 pub struct CalcSharesAndUsableAmountsResponse {
     pub shares: Uint128,
     pub usable_amount0: Uint128,
-    pub usable_amount1: Uint128
+    pub usable_amount1: Uint128,
 }
-

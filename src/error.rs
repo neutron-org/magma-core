@@ -1,5 +1,5 @@
 use crate::constants::TWAP_SECONDS;
-use cosmwasm_std::Uint128;
+use cosmwasm_std::{Uint128, Uint256};
 use neutron_std::types::neutron::util::precdec::PrecDec;
 use thiserror::Error;
 
@@ -114,10 +114,10 @@ pub enum RebalanceError {
     #[error(
         "Cant rebalance, price hasnt moved enough (price: {price}; movement_factor: {factor})"
     )]
-    PriceHasntMovedEnough { price: Uint128, factor: Uint128 },
-
+    PriceHasntMovedEnough { price: Uint256, factor: PrecDec },
+    
     #[error("Cant rebalance, the price {price} moved outside [{twap}*0.99, {twap}*1.01]")]
-    PriceMovedTooMuchInLastMinute { price: Uint128, twap: Uint128 },
+    PriceMovedTooMuchInLastMinute { price: Uint256, twap: Uint256 },
 
     #[error("Cant rebalance pools that were created less than {TWAP_SECONDS} seconds ago")]
     PoolWasJustCreated(),

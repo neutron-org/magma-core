@@ -1,6 +1,7 @@
-use std::str::FromStr;
-use cosmwasm_std::{Decimal, Decimal256, Int128, SignedDecimal256, Uint128};
 use crate::state::{PositiveDecimal, PriceFactor, Weight};
+use cosmwasm_std::{Decimal, Decimal256, Int128, SignedDecimal256, Uint128};
+use std::str::FromStr;
+use neutron_std::types::neutron::util::precdec::PrecDec;
 
 /// Used to chain anyhow::Result computations without closure boilerplate.
 #[macro_export]
@@ -22,7 +23,7 @@ macro_rules! do_some {
     }
 }
 
-/// Used to build do-notation like blocks with anyhow::Result 
+/// Used to build do-notation like blocks with anyhow::Result
 /// without closure boilerplate.
 #[macro_export]
 macro_rules! do_me {
@@ -38,11 +39,7 @@ macro_rules! do_me {
 #[macro_export]
 macro_rules! assert_approx_eq {
     ($a:expr, $b:expr, $tol:expr) => {
-        let d = if $a > $b {
-            $a - $b
-        } else { 
-            $b - $a 
-        };
+        let d = if $a > $b { $a - $b } else { $b - $a };
 
         if d > $tol {
             panic!(
@@ -50,17 +47,15 @@ macro_rules! assert_approx_eq {
                  (left: `{:?}`, right: `{:?}`, tolerance: `{:?}`)",
                 $a, $b, $tol
             );
-            
         }
     };
 }
-
 
 pub fn raw<T: From<Uint128>>(d: &Decimal) -> T {
     d.atomics().into()
 }
 
-/// Generalized inverse of Osmosis price function. Ie, it 
+/// Generalized inverse of Osmosis price function. Ie, it
 /// maps each price to its closest tick. Read whitepaper
 /// for further clarification.
 pub fn price_function_inv(p: &Decimal) -> i32 {
@@ -111,8 +106,10 @@ pub fn price_function_inv(p: &Decimal) -> i32 {
 /// its liquidity to be `w*L`, where `L` is the total liquidity
 /// of both, the full range position, and the base one. Read
 /// whitepaper for further clarification.
-pub fn calc_x0(k: &PriceFactor, w: &Weight, x: Decimal) -> Decimal {
-    if w.is_zero() { return Decimal::zero() }
+pub fn calc_x0(k: &PriceFactor, w: &Weight, x: PrecDec) -> PrecDec {
+    if w.is_zero() {
+        return PrecDec::zero();
+    }
     do_me! {
         let sqrt_k = k.0.sqrt();
 
@@ -121,11 +118,11 @@ pub fn calc_x0(k: &PriceFactor, w: &Weight, x: Decimal) -> Decimal {
             .checked_mul(x.into())?;
 
         let denominator = sqrt_k
-            .checked_sub(Decimal::one())?
+            .checked_sub(PrecDec::one())?
             .checked_add(w.0)?;
 
         let x0 = numerator.checked_div(denominator.into())?;
         Decimal::try_from(x0)?
-    }.unwrap()
+    }
+    .unwrap()
 }
-
