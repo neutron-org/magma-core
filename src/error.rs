@@ -34,6 +34,9 @@ pub enum ContractError {
 
     #[error("Invalid price")]
     InvalidPrice,
+
+    #[error("Query Deposit error")]
+    QueryDepositError,
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -133,6 +136,9 @@ pub enum RebalanceError {
     
     #[error("Invalid deposit price: {0}")]
     InvalidDepositPrice(PrecDec),
+
+    #[error("Invalid deposit")]
+    InvalidDeposit(),    
 
     
 }

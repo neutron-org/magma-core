@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use cosmwasm_std::{
     coin, coins, Addr, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
-    SubMsg, Uint128, Uint256,
+    SubMsg, Uint128, Uint256, CosmosMsg, StdError
 };
 use cw20_base::{
     contract::{execute_burn, execute_mint, query_balance, query_token_info},
@@ -21,23 +21,17 @@ use neutron_std::types::{
 use neutron_std::types::neutron::util::precdec::PrecDec;
 
 use crate::{
-    assert_approx_eq, do_some,
-    constants::{MIN_LIQUIDITY, PROTOCOL_ADDR},
-    duality_helpers::{get_tick_index_for_liquidity, max_price, price_to_tick_index, sort_token_data_and_get_pair_id_str},
-    error::{
+    assert_approx_eq, constants::{MIN_LIQUIDITY, PROTOCOL_ADDR}, do_some, error::{
         AdminOperationError, DepositError, ProtocolOperationError, RebalanceError,
         WithdrawalError,
-    },
-    msg::{
+    }, msg::{
         CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse,
         VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg, WithdrawMsg,
-    },
-    query,
-    state::{
+    }, query, state::{
         FundsInfo, PositionType, StateSnapshot, VaultParameters, VaultRebalancer, VaultState,
         Weight, FEES_INFO, FUNDS_INFO, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE,
-    },
-    utils::{calc_x0, price_function_inv, raw},
+    }, utils::{calc_x0, price_function_inv, raw},
+    duality_helpers::{ONE_ITEM_PAGINATION, get_tick_index_for_liquidity, max_price, price_to_tick_index, sort_token_data_and_get_pair_id_str, get_all_user_deposits}
 };
 
 pub fn deposit(
@@ -324,15 +318,17 @@ pub fn rebalance(
         let lower_tick = vault_info.min_valid_tick();
         let upper_tick = vault_info.max_valid_tick();
 
+        let deposit_msg = create_position_msg(
+            lower_tick,
+            upper_tick,
+            full_range_balance0,
+            full_range_balance1,
+            deps,
+            &env,
+        ).map_err(|_| RebalanceError::InvalidDeposit())?;
+    
         new_position_msgs.push(SubMsg::reply_on_success(
-            create_position_msg(
-                lower_tick,
-                upper_tick,
-                full_range_balance0,
-                full_range_balance1,
-                deps,
-                &env,
-            ),
+            Into::<CosmosMsg>::into(deposit_msg),
             0,
         ))
     }
@@ -350,6 +346,7 @@ pub fn rebalance(
         let upper_tick = price_to_tick_index(upper_price).unwrap();
 
         new_position_msgs.push(SubMsg::reply_on_success(
+            Into::<CosmosMsg>::into(
             create_position_msg(
                 lower_tick,
                 upper_tick,
@@ -357,7 +354,8 @@ pub fn rebalance(
                 base_range_balance1,
                 deps,
                 &env,
-            ).into(),
+            ).into()
+        ),
             1,
         ))
     }
@@ -381,7 +379,7 @@ pub fn rebalance(
                     limit_balance1,
                     deps,
                     &env,
-                ),
+                ).into(),
                 2,
             ))
         } else if limit_balance1.is_zero() {
@@ -393,16 +391,17 @@ pub fn rebalance(
             let lower_tick = vault_info
                 .current_tick(&deps.querier);
                 
+            let deposit_msg = create_position_msg(
+                lower_tick,
+                upper_tick,
+                limit_balance0,
+                PrecDec::zero(),
+                deps,
+                &env,
+            ).map_err(|_| RebalanceError::InvalidDeposit())?;
 
             new_position_msgs.push(SubMsg::reply_on_success(
-                create_position_msg(
-                    lower_tick,
-                    upper_tick,
-                    limit_balance0,
-                    PrecDec::zero(),
-                    deps,
-                    &env,
-                ),
+                Into::<CosmosMsg>::into(deposit_msg).into(),
                 2,
             ))
         } else {
@@ -416,14 +415,9 @@ pub fn rebalance(
         }
     }
 
-    let liquidity_removal_msgs: Vec<_> = vec![
-        remove_liquidity_msg(PositionType::FullRange, deps, &env, &Weight::max()),
-        remove_liquidity_msg(PositionType::Base, deps, &env, &Weight::max()),
-        remove_liquidity_msg(PositionType::Limit, deps, &env, &Weight::max()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let liquidity_removal_msg= remove_liquidity_msg(deps, &env, &Weight::max());
+        
+
 
     // Invariant: Wont panic as all types are proper.
     VAULT_STATE
@@ -462,13 +456,18 @@ pub fn rebalance(
         })
         .unwrap();
 
-    let position_ids: Vec<_> = liquidity_removal_msgs
-        .iter()
-        .map(|msg| msg.position_id)
-        .collect();
+    // let position_ids: Vec<_> = liquidity_removal_msgs
+    //     .iter()
+    //     .map(|msg| msg.position_id)
+    //     .collect();
 
-    Ok(Response::new()
-        .add_messages(liquidity_removal_msgs)
+    let mut response = Response::new();
+
+    if let Some(msg) = liquidity_removal_msg {
+        response = response.add_submessage(SubMsg::new( Into::<CosmosMsg>::into(msg)));
+    }
+
+    Ok(response
         .add_submessages(new_position_msgs))
 }
 
@@ -567,7 +566,6 @@ fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), Rebalanc
 /// - `None`: If `liquidity_proportion == 0` or `for_position` has no open position.
 /// - `Some(_)`: Otherwise.
 pub fn remove_liquidity_msg(
-    _for_position: PositionType,
     deps: Deps,
     env: &Env,
     liquidity_proportion: &Weight,
@@ -576,60 +574,55 @@ pub fn remove_liquidity_msg(
         return None;
     }
 
-    let vault_info = VAULT_INFO.load(deps.storage).unwrap();
-    let pair_id = vault_info.pair_id;
+    let deposits = get_all_user_deposits(&env, &deps.querier).unwrap();
 
-    let [token0, token1] = pair_id.0;
+    // No deposits to withdraw
+    if deposits.is_empty() {
+        return None;
+    }
 
-    // Invariant: We know that if `position_id` is in the state, then
-    //            it refers to a valid `FullPositionBreakdown`.
-    let position_liquidity = do_some!(
-        PositionByIdRequest { position_id }
-            .query(&deps.querier)
-            .ok()?
-            .position?
-            .position?
-            .liquidity
-    )
-    .unwrap();
+    let mut shares_to_remove: Vec<String> = Vec::new(); 
+    let mut tick_indexes_to_remove: Vec<i64> = Vec::new();
+    let mut fees_to_remove: Vec<u64> = Vec::new();
 
-    // Invariant: We know any position liquidity is a valid Decimal.
-    let position_liquidity = liquidity_proportion
-        .mul_dec(&Decimal::from_str(&position_liquidity).unwrap())
-        .atomics()
-        .to_string();
+
+    for (_, deposit) in deposits.iter().enumerate() {
+        let shares_owned = PrecDec::from_str(&deposit.shares_owned).unwrap();
+        shares_to_remove.push(shares_owned.checked_mul(liquidity_proportion.0).unwrap().to_uint_floor().to_string());
+        tick_indexes_to_remove.push(deposit.center_tick_index);
+        fees_to_remove.push(deposit.fee);
+    }
+
+    let pair_id = deposits[0].pair_id.as_ref().unwrap();
 
     Some(MsgWithdrawal {
         creator: env.contract.address.to_string(),
         receiver: env.contract.address.to_string(),
-        token_a: position_id.token_a,
-        token_b: token1,
-        shares_to_remove: vec![position_liquidity],
-        tick_indexes_a_to_b: vec![],
-        fees: vec![],
-        options: vec![],
+        token_a: pair_id.token0.clone(),
+        token_b: pair_id.token1.clone(),
+        shares_to_remove,
+        tick_indexes_a_to_b: tick_indexes_to_remove,
+        fees: fees_to_remove,
     })
 }
 
 pub fn create_position_msg(
-    lower_tick: i32,
-    upper_tick: i32,
+    lower_tick: i64,
+    upper_tick: i64,
     tokens_provided0: PrecDec,
     tokens_provided1: PrecDec,
     deps: Deps,
     env: &Env,
-) -> MsgDeposit {
+) -> Result<MsgDeposit, StdError> {
+
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
-    let pair_id = vault_info.pair_id;
-
-    let [token0, token1] = pair_id.0;
-
+    let [token0, token1] = vault_info.pair_id.0.clone();
 
     let mut deposit_msg = MsgDeposit {
         creator: env.contract.address.to_string(),
         receiver: env.contract.address.to_string(),
-        token_a: token0,
-        token_b: token1,
+        token_a: token0.clone(),
+        token_b: token1.clone(),
         amounts_a: vec![],
         amounts_b: vec![],
         tick_indexes_a_to_b: vec![],
@@ -637,13 +630,13 @@ pub fn create_position_msg(
         options: vec![],
     };
 
-    let pair_id = sort_token_data_and_get_pair_id_str(&token0, &token1);
+    let pair_id_str = sort_token_data_and_get_pair_id_str(&token0, &token1);
     let dex_querier = DexQuerier::new(&deps.querier);
 
     let liq_token0: QueryAllTickLiquidityResponse =
-        dex_querier.tick_liquidity_all(pair_id.clone(), token0, pagination)?;
+        dex_querier.tick_liquidity_all(pair_id_str.clone(), token0.clone(), Some(ONE_ITEM_PAGINATION))?;
     let liq_token1: QueryAllTickLiquidityResponse =
-        dex_querier.tick_liquidity_all(pair_id.clone(), token1, pagination)?;
+        dex_querier.tick_liquidity_all(pair_id_str.clone(), token1.clone(), Some(ONE_ITEM_PAGINATION))?;
 
     let min_token0_tick = get_tick_index_for_liquidity(&liq_token0.tick_liquidity[0]) * -1;
     let min_token1_tick = get_tick_index_for_liquidity(&liq_token1.tick_liquidity[0]);
@@ -655,12 +648,16 @@ pub fn create_position_msg(
     let mut deposit_amount0 = Uint128::zero();
     let mut deposit_amount1 = Uint128::zero();
 
-    for i in start_tick..end_tick {
+    let fee = 2;
+
+    for i in lower_tick..upper_tick {
         if (i - fee <= middle_tick && token0_cheaper) || i + fee >= middle_tick && !token0_cheaper {
+            // TODO: fix this deposit amount
             deposit_amount0 = Uint128::from_str("10").unwrap();
         }
 
         if (i - fee <= middle_tick && !token0_cheaper) || i + fee >= middle_tick && token0_cheaper {
+            // TODO: fix me
             deposit_amount1 = Uint128::from_str("10").unwrap();
         }
 
@@ -668,7 +665,7 @@ pub fn create_position_msg(
             disable_autoswap: false,
             fail_tx_on_bel: true,
             swap_on_deposit: true,
-            swap_on_deposit_slop_tolerance_bps: POSITION_CREATION_SLIPPAGE_BPS,
+            swap_on_deposit_slop_tolerance_bps: 0,
         }];
 
         deposit_msg.tick_indexes_a_to_b.push(i);
@@ -677,7 +674,7 @@ pub fn create_position_msg(
         deposit_msg.fees.push(fee as u64);
     }
 
-    Ok(Response::new().add_message(deposit_msg))
+    Ok(deposit_msg)
 }
 
 pub fn withdraw(
@@ -806,19 +803,13 @@ pub fn withdraw(
         });
     }
 
-    let liquidity_removal_msgs: Vec<_> = vec![
-        remove_liquidity_msg(
-            PositionType::FullRange,
+    let liquidity_removal_msg = remove_liquidity_msg(
             deps.as_ref(),
             &env,
             &shares_proportion,
-        ),
-        remove_liquidity_msg(PositionType::Base, deps.as_ref(), &env, &shares_proportion),
-        remove_liquidity_msg(PositionType::Limit, deps.as_ref(), &env, &shares_proportion),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+        );
+        
+    
 
     if shares_proportion.is_max() {
         // Hypothesis: `unreachable!()` due to MIN_LIQUIDITY; VaultState position IDs can only
@@ -833,31 +824,18 @@ pub fn withdraw(
             .unwrap();
     }
 
-    let position_ids: Vec<_> = liquidity_removal_msgs
-        .iter()
-        .map(|msg| msg.position_id)
-        .collect();
-
-    let rewards_claim_msg = MsgCollectSpreadRewards {
-        position_ids: position_ids.clone(),
-        sender: env.contract.address.clone().into(),
-    };
-
-    let incentives_claim_msg = MsgCollectIncentives {
-        position_ids,
-        sender: env.contract.address.clone().into(),
-    };
 
     // Invariant: `VAULT_INFO` will always be present after instantiation.
     let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms();
 
     // Invariant: We verified earlier that `info.sender` holds at least `shares`.
-    let shares_burn_response = execute_burn(deps, env.clone(), info, shares).unwrap();
+    let mut shares_burn_response = execute_burn(deps, env.clone(), info, shares).unwrap();
+
+    if let Some(msg) = liquidity_removal_msg {
+        shares_burn_response = shares_burn_response.add_message(Into::<CosmosMsg>::into(msg));
+    }    
 
     Ok(shares_burn_response
-        .add_message(rewards_claim_msg)
-        .add_message(incentives_claim_msg)
-        .add_messages(liquidity_removal_msgs)
         .add_message(BankMsg::Send {
             to_address: withdrawal_address.into(),
             amount: vec![

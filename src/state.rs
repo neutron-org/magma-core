@@ -47,7 +47,7 @@ impl Weight {
     }
 
     pub fn zero() -> Self {
-        Self(Decimal::zero())
+        Self(PrecDec::zero())
     }
 
     pub fn max() -> Self {
@@ -55,7 +55,7 @@ impl Weight {
     }
 
     pub fn is_zero(&self) -> bool {
-        self.0 == Decimal::zero()
+        self.0 == PrecDec::zero()
     }
 
     pub fn is_max(&self) -> bool {
@@ -106,7 +106,7 @@ impl PairId {
         self.0.join("<>")
     }
 
-    pub fn current_tick0(&self, querier: &QuerierWrapper) -> Result<i32, DexError> {
+    pub fn current_tick0(&self, querier: &QuerierWrapper) -> Result<i64, DexError> {
         let querier = DexQuerier::new(querier);
         let pair_id_str = self.pair_id_str();
 
@@ -360,7 +360,7 @@ impl VaultInfo {
         (self.demon0(), self.demon1())
     }
 
-    pub fn current_tick(&self, querier: &QuerierWrapper) -> i32 {
+    pub fn current_tick(&self, querier: &QuerierWrapper) -> i64 {
         // TODO: direction?
         self.pair_id.current_tick0(querier).unwrap()
     }
@@ -368,12 +368,12 @@ impl VaultInfo {
     
 
     /// Min possible tick 
-    pub fn min_valid_tick(&self) -> i32 {
+    pub fn min_valid_tick(&self) -> i64 {
         -559680
     }
 
     /// Max possible tick 
-    pub fn max_valid_tick(&self) -> i32 {
+    pub fn max_valid_tick(&self) -> i64 {
         559680
     }
 

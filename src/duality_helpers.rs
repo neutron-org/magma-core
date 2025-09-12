@@ -1,7 +1,7 @@
     use std::str::FromStr;
 
     use neutron_std::types::cosmos::base::query::v1beta1::PageRequest;
-    use neutron_std::types::neutron::dex::{tick_liquidity, DexQuerier, PairId, TickLiquidity};
+    use neutron_std::types::neutron::dex::{tick_liquidity, DexQuerier, PairId, TickLiquidity, DepositRecord};
     use neutron_std::types::neutron::util::precdec::PrecDec;
     use cosmwasm_std::{Addr, Decimal, Deps, Env, QuerierWrapper, Timestamp, Uint128};
 
@@ -15,7 +15,7 @@
 
     /// Converts a price to a tick index.
     /// This is used to calculate the tick index for the AMM Deposit.
-    pub fn price_to_tick_index(price: PrecDec) -> Result<i32, ContractError> {
+    pub fn price_to_tick_index(price: PrecDec) -> Result<i64, ContractError> {
         // Ensure the price is greater than 0
         if price.is_zero() || price < PrecDec::zero() {
             return Err(ContractError::InvalidPrice);
@@ -37,7 +37,7 @@
         let tick_index = -(log_price / log_base);
 
         // Convert the tick index to i64, rounding to the nearest integer
-        Ok(tick_index.round() as i32)
+        Ok(tick_index.round() as i64)
     }
 
     pub fn sort_token_data_and_get_pair_id_str(token0: &String, token1: &String) -> String {
@@ -49,7 +49,7 @@
         tokens.join("<>")
     }
 
-    pub fn get_tick_index_for_liquidity(liquidity: &TickLiquidity) -> i32 {
+    pub fn get_tick_index_for_liquidity(liquidity: &TickLiquidity) -> i64 {
         let liq = liquidity.liquidity.as_ref().unwrap();
         match liq {
             tick_liquidity::Liquidity::PoolReserves(pool_reserves) => {
@@ -57,7 +57,7 @@
                     .key
                     .as_ref()
                     .unwrap()
-                    .tick_index_taker_to_maker as i32
+                    .tick_index_taker_to_maker
             }
             tick_liquidity::Liquidity::LimitOrderTranche(limit_order) => {
                 limit_order.key.as_ref().unwrap().tick_index_taker_to_maker
@@ -79,9 +79,10 @@
         price_base.pow(tick_index as u32)
     }
 
-    pub fn shares_owned(env: &Env, pair_id: &PairId, querier: &QuerierWrapper) -> Result<Vec<UserDeposit>, ContractError> {
+    pub fn get_all_user_deposits(env: &Env, querier: &QuerierWrapper) -> Result<Vec<DepositRecord>, ContractError> {
         let querier = DexQuerier::new(querier);
 
+        // TODO: iterate to query all
         let user_deposits = querier.user_deposits_all(
             env.contract.address.to_string(),
             Some(PageRequest {
@@ -94,5 +95,5 @@
             false,
         );
 
-        user_deposits.map_err(|_| ContractError::StdError)?.deposits        
+        Ok(user_deposits.map_err(|_| ContractError::QueryDepositError)?.deposits)
     }
