@@ -66,7 +66,7 @@ pub enum ExecuteMsg {
     Deposit(DepositMsg),
     Rebalance {},
     Withdraw(WithdrawMsg),
-    WithdrawProtocolFees {},
+    // WithdrawProtocolFees {},
     WithdrawAdminFees {},
     ChangeVaultInfo(VaultInfoInstantiateMsg),
     ChangeVaultParameters(VaultParametersInstantiateMsg),

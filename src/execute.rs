@@ -2,11 +2,13 @@ use std::str::FromStr;
 
 use cosmwasm_std::{coin, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg, Uint128};
 use cw20_base::{contract::{execute_burn, execute_mint, query_balance, query_token_info}, state::TOKEN_INFO};
-use osmosis_std::types::osmosis::concentratedliquidity::v1beta1::{MsgCollectSpreadRewards, MsgCreatePosition, MsgWithdrawPosition, PositionByIdRequest};
+use neutron_std::types::neutron::dex::{DepositOptions, DexQuerier, MsgDeposit, MsgWithdrawalWithShares, QueryAllTickLiquidityResponse};
 
 use crate::{
-    constants::{MIN_LIQUIDITY, PROTOCOL, VAULT_CREATION_COST_DENOM}, do_some, error::{AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError}, msg::{CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, WithdrawMsg}, query, state::{
-        FundsInfo, PositionType, ProtocolFee, StateSnapshot, VaultInfo, VaultParameters, VaultRebalancer, VaultState, Weight, FEES_INFO, FUNDS_INFO, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE}, utils::{calc_x0, price_function_inv, raw}};
+    constants::{MIN_LIQUIDITY, PROTOCOL, VAULT_CREATION_COST_DENOM}, do_some, duality_helpers::{ONE_ITEM_PAGINATION, get_tick_index_for_liquidity, sort_token_data_and_get_pair_id_str}, error::{AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError}, msg::{CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, WithdrawMsg}, query, state::{
+        FEES_INFO, FUNDS_INFO, FundsInfo, PositionType, ProtocolFee, StateSnapshot, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE, VaultInfo, VaultParameters, VaultRebalancer, VaultState, Weight}, utils::{calc_x0, price_function_inv, raw}};
+use crate::duality_helpers::{calc_shares_proportion, price_to_tick_index};
+use neutron_std::types::cosmos::base::v1beta1::Coin;
 
 pub fn deposit(
     DepositMsg {
@@ -25,7 +27,7 @@ pub fn deposit(
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let contract_addr = env.contract.address.clone();
 
-    let (denom0, denom1) = vault_info.denoms(&deps.querier);
+    let (denom0, denom1) = vault_info.denoms();
 
     if amount0.is_zero() && amount1.is_zero() && info.funds.is_empty() {
         return Err(ZeroTokensSent {});
@@ -140,8 +142,8 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let mut vault_state = VAULT_STATE.load(deps.storage).unwrap();
 
-    let pool_id = vault_info.pool_id.clone();
-    let price = pool_id.price(&deps.querier);
+    let pair_id = vault_info.pair_id.clone();
+    let price = pair_id.price(&deps.querier).map_err(|_| RebalanceError::CannotFetchPrice())?;
 
     can_rebalance(deps, env.clone(), info)?;
 
@@ -174,7 +176,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     if price.is_zero() {
         // TODO: If the pool has no price, we should be able to deposit 
         //       in any proportion. But we dont support that for now.
-        return Err(PoolWithoutPrice(pool_id.0));
+        return Err(PairWithoutPrice(pair_id.pair_id_str()));
     }
 
     let (balanced_balance0, balanced_balance1) = {
@@ -272,9 +274,11 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     // `full_range_balance1` will be. If they happened to be zero, it means that
     // the vault only holds tokens for limit orders for now, or that
     // the vault simply has zero `full_range_weight`.
+
+    //TODO: can't actually support full range
     if !full_range_weight.is_zero() && !full_range_balance0.is_zero() {
-        let lower_tick = vault_info.min_valid_tick(&deps.querier);
-        let upper_tick = vault_info.max_valid_tick(&deps.querier);
+        let lower_tick = vault_info.min_valid_tick();
+        let upper_tick = vault_info.max_valid_tick();
 
         new_position_msgs.push(SubMsg::reply_on_success(
             create_position_msg(
@@ -296,8 +300,8 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         let lower_price = price.checked_div(base_factor.0).unwrap();
         let upper_price = price.checked_mul(base_factor.0).unwrap_or(Decimal::MAX);
 
-        let lower_tick = price_function_inv(&lower_price);
-        let upper_tick = price_function_inv(&upper_price);
+        let lower_tick = price_to_tick_index(&lower_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: lower_price.to_string(), err: err.to_string() })?;
+        let upper_tick = price_to_tick_index(&upper_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: upper_price.to_string(), err: err.to_string() })?;
 
         new_position_msgs.push(SubMsg::reply_on_success(
             create_position_msg(
@@ -316,14 +320,13 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         if limit_balance0.is_zero() {
             // Invariant: `limit_factor > 1`, thus wont panic.
             let lower_price = price.checked_div(limit_factor.0).unwrap();
-            let lower_tick = price_function_inv(&lower_price);
+            let lower_tick = price_to_tick_index(&lower_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: lower_price.to_string(), err: err.to_string() })?;
 
             // Invariant: Ticks nor Ticks spacings will ever be large enough to
             //            overflow out of `i32`.
             let upper_tick = vault_info
-                .current_tick(&deps.querier)
-                .checked_sub(vault_info.tick_spacing(&deps.querier))
-                .unwrap();
+                .current_tick(&deps.querier);
+                
 
             new_position_msgs.push(SubMsg::reply_on_success(
                 create_position_msg(
@@ -338,14 +341,13 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
             ))
         } else if limit_balance1.is_zero() {
             let upper_price = price.checked_mul(limit_factor.0).unwrap_or(Decimal::MAX);
-            let upper_tick = price_function_inv(&upper_price);
+            let upper_tick = price_to_tick_index(&upper_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: upper_price.to_string(), err: err.to_string() })?;
 
             // Invariant: Ticks nor Ticks spacings will never be large enough to
             //            overflow out of `i32`.
             let lower_tick = vault_info
-                .current_tick(&deps.querier)
-                .checked_add(vault_info.tick_spacing(&deps.querier))
-                .unwrap();
+                .current_tick(&deps.querier);              
+                
 
             new_position_msgs.push(SubMsg::reply_on_success(
                 create_position_msg(
@@ -418,8 +420,8 @@ fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), Rebalanc
     // Invariant: Any state is always present after instantition.
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let vault_state = VAULT_STATE.load(deps.storage).unwrap();
-    let price = vault_info.pool_id.price(&deps.querier);
-    let twap_price = vault_info.pool_id.twap(&deps.querier, &env).ok_or(PoolWasJustCreated())?;
+    let price = vault_info.pair_id.price(&deps.querier);
+    let twap_price = vault_info.pair_id.twap(&deps.querier, &env).ok_or(PoolWasJustCreated())?;
     
     match vault_info.rebalancer {
         VaultRebalancer::Admin { } => {
@@ -508,69 +510,104 @@ pub fn remove_liquidity_msg(
     if liquidity_proportion.is_zero() { return None }
 
     // Invariant: After instantiation, `VAULT_STATE` is always present.
-    let position_id = VAULT_STATE
+    let position_shares = VAULT_STATE
         .load(deps.storage)
         .unwrap()
-        .from_position_type(for_position)?;
+        .from_position_type(for_position);
 
-    // Invariant: We know that if `position_id` is in the state, then
-    //            it refers to a valid `FullPositionBreakdown`.
-    let position_liquidity = do_some!(PositionByIdRequest { position_id }
-        .query(&deps.querier).ok()?
-        .position?
-        .position?
-        .liquidity
-    ).unwrap();
+    
+    if let Some(position_shares) = position_shares {
+        // Invariant: We know any position liquidity is a valid Decimal.
+    let shares_to_remove: Vec<Coin> = position_shares.iter()
+    .map(|share| calc_shares_proportion(*share, liquidity_proportion))
+    .collect();
+    
 
-    // Invariant: We know any position liquidity is a valid Decimal.
-    let position_liquidity = liquidity_proportion
-        .mul_dec(&Decimal::from_str(&position_liquidity).unwrap())
-        .atomics()
-        .to_string();
+Some(MsgWithdrawalWithShares {
+    shares_to_remove,
+    creator: env.contract.address.clone().into(),
+    receiver: env.contract.address.clone().into(),
+})
+    } else {    
+        return None
+    }
 
-    Some(MsgWithdrawPosition {
-        position_id,
-        sender: env.contract.address.clone().into(),
-        liquidity_amount: position_liquidity,
-    })
+    
 }
 
 pub fn create_position_msg(
-    lower_tick: i32,
-    upper_tick: i32,
+    lower_tick: i64,
+    upper_tick: i64,
     tokens_provided0: Decimal,
     tokens_provided1: Decimal,
     deps: Deps,
     env: &Env,
-) -> MsgCreatePosition {
-    use osmosis_std::types::cosmos::base::v1beta1::Coin;
+) -> Result<MsgDeposit, StdError> {
 
-    // Invariant: Any state will be initialized after instantation.
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
-    let pool = vault_info.pool(&deps.querier);
+    let [token0, token1] = vault_info.pair_id.0.clone();
 
-    let tokens_provided = vec![
-        Coin { denom: pool.token0.clone(), amount: raw(&tokens_provided0) },
-        Coin { denom: pool.token1.clone(), amount: raw(&tokens_provided1) },
-    ]
-    .into_iter()
-    .filter(|c| c.amount != "0")
-    .collect();
+    let mut deposit_msg = MsgDeposit {
+        creator: env.contract.address.to_string(),
+        receiver: env.contract.address.to_string(),
+        token_a: token0.clone(),
+        token_b: token1.clone(),
+        amounts_a: vec![],
+        amounts_b: vec![],
+        tick_indexes_a_to_b: vec![],
+        fees: vec![],
+        options: vec![],
+    };
 
-    let lower_tick = vault_info.closest_valid_tick(lower_tick, &deps.querier).into();
-    let upper_tick = vault_info.closest_valid_tick(upper_tick, &deps.querier).into();
+    let pair_id_str = sort_token_data_and_get_pair_id_str(&token0, &token1);
+    let dex_querier = DexQuerier::new(&deps.querier);
 
-    let slippage = Weight::new("0.997").unwrap();
+    let liq_token0: QueryAllTickLiquidityResponse =
+        dex_querier.tick_liquidity_all(pair_id_str.clone(), token0.clone(), Some(ONE_ITEM_PAGINATION))?;
+    let liq_token1: QueryAllTickLiquidityResponse =
+        dex_querier.tick_liquidity_all(pair_id_str.clone(), token1.clone(), Some(ONE_ITEM_PAGINATION))?;
 
-    MsgCreatePosition {
-        pool_id: pool.id,
-        sender: env.contract.address.clone().into(),
-        lower_tick,
-        upper_tick,
-        tokens_provided,
-        token_min_amount0: raw(&slippage.mul_dec(&tokens_provided0)),
-        token_min_amount1: raw(&slippage.mul_dec(&tokens_provided1)),
+    let min_token0_tick = get_tick_index_for_liquidity(&liq_token0.tick_liquidity[0]) * -1;
+    let min_token1_tick = get_tick_index_for_liquidity(&liq_token1.tick_liquidity[0]);
+
+    let middle_tick = (min_token0_tick + min_token1_tick) / 2;
+
+    let token0_cheaper = min_token0_tick < min_token1_tick;
+
+    let mut deposit_amount0 = Uint128::zero();
+    let mut deposit_amount1 = Uint128::zero();
+
+    let fee = 2;
+
+    let options = DepositOptions {
+        disable_autoswap: false,
+        fail_tx_on_bel: true,
+        swap_on_deposit: true,
+        swap_on_deposit_slop_tolerance_bps: 0,
+    
+    };
+
+    for i in lower_tick..upper_tick {
+        if (i - fee <= middle_tick && token0_cheaper) || i + fee >= middle_tick && !token0_cheaper {
+            // TODO: fix this deposit amount
+            deposit_amount0 = Uint128::from_str("10").unwrap();
+        }
+
+        if (i - fee <= middle_tick && !token0_cheaper) || i + fee >= middle_tick && token0_cheaper {
+            // TODO: fix me
+            deposit_amount1 = Uint128::from_str("10").unwrap();
+        }
+
+      
+
+        deposit_msg.tick_indexes_a_to_b.push(i);
+        deposit_msg.amounts_a.push(deposit_amount0.to_string());
+        deposit_msg.amounts_b.push(deposit_amount1.to_string());
+        deposit_msg.fees.push(fee as u64);
+        deposit_msg.options.push(options);
     }
+
+    Ok(deposit_msg)
 }
 
 pub fn withdraw(
@@ -797,7 +834,7 @@ pub fn change_vault_info(
         return Err(UnauthorizedAdminAccount("change_vault_info".into()))
     }
 
-    if new_vault_info.pool_id != current_vault_info.pool_id.0 {
+    if new_vault_info.pool_id != current_vault_info.pair_id.0 {
         return Err(ImmutableReInstantiation("pool_id".into()))
     }
 

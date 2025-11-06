@@ -1,5 +1,6 @@
 use thiserror::Error;
 use crate::constants::TWAP_SECONDS;
+use neutron_std::types::neutron::util::precdec::PrecDec;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ContractError {
@@ -25,7 +26,13 @@ pub enum ContractError {
     ProtocolOperation(#[from] ProtocolOperationError),
 
     #[error("Cw20 error: {0}")]
-    Cw20(#[from] cw20_base::ContractError)
+    Cw20(#[from] cw20_base::ContractError),
+
+    #[error("Invalid price: {0}")]
+    InvalidPrice(PrecDec),
+
+    #[error("Conversion error: {0}")]
+    ConversionError(String),
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -109,8 +116,14 @@ pub enum RebalanceError {
     #[error("You cant rebalance a vault without funds")]
     NothingToRebalance {},
 
-    #[error("Pool with id {0} is empty, and thus has no price")]
-    PoolWithoutPrice(u64),
+    #[error("Pairs with id {0} is empty, and thus has no price")]
+    PairWithoutPrice(String),
+
+    #[error("Failed to convert price ({price}) to tick: {err}")]
+    FailedToConvertPriceToTick { price: String, err: String },
+
+    #[error("Cannot fetch price")]
+    CannotFetchPrice(),
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -160,3 +173,8 @@ pub enum AdminOperationError {
     RemovingAdminWithUncollectedAdminFees()
 }
 
+#[derive(Error, Debug, PartialEq)]
+pub enum DexError {
+    #[error("Cannot fetch price")]
+    CannotFetchPrice(),
+}

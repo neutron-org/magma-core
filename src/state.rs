@@ -1,43 +1,48 @@
 use crate::constants::{
     MAX_PROTOCOL_FEE, MAX_TICK, MAX_VAULT_CREATION_COST, TWAP_SECONDS, VAULT_CREATION_COST_DENOM
 };
-use crate::error::{InstantiationError, ProtocolOperationError};
+use crate::error::{DexError, InstantiationError, ProtocolOperationError};
 use crate::{
     constants::MIN_TICK,
     msg::{VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg},
 };
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Decimal, Deps, Env, MessageInfo, QuerierWrapper, Timestamp, Uint128};
+use cosmwasm_std::{Addr, Deps, Env, MessageInfo, QuerierWrapper, Timestamp, Uint128};
 use cw_storage_plus::Item;
-use osmosis_std::types::osmosis::twap::v1beta1::TwapQuerier;
+// use osmosis_std::types::osmosis::twap::v1beta1::TwapQuerier;
 use osmosis_std::types::osmosis::{
     concentratedliquidity::v1beta1::Pool, poolmanager::v1beta1::PoolmanagerQuerier,
 };
+use neutron_std::types::{neutron::dex::DexQuerier,
+cosmos::base::v1beta1::{Coin},
+neutron::util::precdec::PrecDec
+};
 use readonly;
 use std::{cmp::min_by_key, str::FromStr};
+use crate::duality_helpers::{ONE_ITEM_PAGINATION, tick_index_to_price, get_tick_index_for_liquidity};
 
 #[cw_serde]
 #[readonly::make]
-pub struct Weight(pub Decimal);
+pub struct Weight(pub PrecDec);
 impl Weight {
-    pub const MAX: Decimal = Decimal::one();
+    pub const MAX: PrecDec = PrecDec::one();
 
     pub fn new(value: &str) -> Option<Self> {
-        let value = Decimal::from_str(value).ok()?;
+        let value = PrecDec::from_str(value).ok()?;
         (value <= Self::MAX).then_some(Self(value))
     }
 
-    pub fn mul_dec(&self, value: &Decimal) -> Decimal {
+    pub fn mul_dec(&self, value: &PrecDec) -> PrecDec {
         // Invariant: A weight product wont ever overflow.
         value.checked_mul(self.0).unwrap()
     }
 
-    pub fn mul_raw(&self, value: Uint128) -> Decimal {
-        self.mul_dec(&Decimal::raw(value.into()))
+    pub fn mul_raw(&self, value: Uint128) -> PrecDec {
+        self.mul_dec(&PrecDec::raw(value.into()))
     }
 
     pub fn zero() -> Self {
-        Self(Decimal::zero())
+        Self(PrecDec::zero())
     }
 
     pub fn max() -> Self {
@@ -45,7 +50,7 @@ impl Weight {
     }
 
     pub fn is_zero(&self) -> bool {
-        self.0 == Decimal::zero()
+        self.0 == PrecDec::zero()
     }
 
     pub fn is_max(&self) -> bool {
@@ -53,9 +58,9 @@ impl Weight {
     }
 }
 
-impl TryFrom<Decimal> for Weight {
+impl TryFrom<PrecDec> for Weight {
     type Error = ();
-    fn try_from(value: Decimal) -> Result<Self, Self::Error> {
+    fn try_from(value: PrecDec) -> Result<Self, Self::Error> {
         if value > Self::MAX {
             Err(())
         } else {
@@ -66,10 +71,10 @@ impl TryFrom<Decimal> for Weight {
 
 #[cw_serde]
 #[readonly::make]
-pub struct PositiveDecimal(pub Decimal);
+pub struct PositiveDecimal(pub PrecDec);
 impl PositiveDecimal {
-    pub fn new(value: &Decimal) -> Option<Self> {
-        (value != Decimal::zero()).then_some(Self(*value))
+    pub fn new(value: &PrecDec) -> Option<Self> {
+        (value != PrecDec::zero()).then_some(Self(*value))
     }
 
     pub fn floorlog10(&self) -> i32 {
@@ -87,60 +92,57 @@ impl PositiveDecimal {
 
 #[cw_serde]
 #[readonly::make]
-pub struct PoolId(pub u64);
-impl PoolId {
-    pub fn new(pool_id: u64, querier: &QuerierWrapper) -> Option<Self> {
-        let querier = PoolmanagerQuerier::new(querier);
-        let encoded_pool = querier.pool(pool_id).ok()?.pool?;
-        // The pool could only not be deserialized if `pool_id`
-        // does not refer to a valid concentrated liquidity pool.
-        Pool::try_from(encoded_pool).ok().and(Some(Self(pool_id)))
+pub struct PairId(pub [String; 2]);
+impl PairId {
+    pub fn new(pair_id: [String; 2]) -> Option<Self> {
+        let mut pair_id_sorted = pair_id.clone();
+        pair_id_sorted.sort();
+
+        Some(Self(pair_id_sorted))
     }
 
-    pub fn to_pool(&self, querier: &QuerierWrapper) -> Pool {
-        let querier = PoolmanagerQuerier::new(querier);
-        // Invariant: We already verified that the id refers to a valid pool the
-        //            moment we constructed `self`.
-        querier
-            .pool(self.0)
-            .unwrap()
-            .pool
-            .unwrap()
-            .try_into()
-            .unwrap()
+    pub fn pair_id_str(&self) -> String {
+        self.0.join("<>")
     }
 
-    pub fn price(&self, querier: &QuerierWrapper) -> Decimal {
-        let pool = self.to_pool(querier);
-        // Invariant: We already verified the params are proper the moment we constructed `self`.
-        let p = PoolmanagerQuerier::new(querier)
-            .spot_price(pool.id, pool.token0, pool.token1)
-            .unwrap()
-            .spot_price;
+    pub fn current_tick0(&self, querier: &QuerierWrapper) -> Result<i64, DexError> {
+        let querier = DexQuerier::new(querier);
+        let pair_id_str = self.pair_id_str();
 
-        // Invariant: We know that `querier.spot_price(...)` returns valid `Decimal` prices.
-        Decimal::from_str(&p).unwrap()
+        let liq_token0 = querier.tick_liquidity_all(
+            pair_id_str.clone(),
+            self.0[0].clone(),
+            Some(ONE_ITEM_PAGINATION),
+        );
+        let liq_token1 = querier.tick_liquidity_all(
+            pair_id_str.clone(),
+            self.0[1].clone(),
+            Some(ONE_ITEM_PAGINATION),
+        );
+
+        if liq_token0.is_err() && liq_token1.is_err() {
+            return Err(DexError::CannotFetchPrice());
+        }
+
+        let price_tick: i64;
+
+        if liq_token0.is_err() {
+            price_tick = get_tick_index_for_liquidity(&liq_token1.unwrap().tick_liquidity[0]) * -1;
+        } else if liq_token1.is_err() {
+            price_tick = get_tick_index_for_liquidity(&liq_token0.unwrap().tick_liquidity[0]);
+        } else {
+            let price_tick0 = get_tick_index_for_liquidity(&liq_token0.unwrap().tick_liquidity[0]);
+            let price_tick1 = get_tick_index_for_liquidity(&liq_token1.unwrap().tick_liquidity[0]);
+            price_tick = (price_tick0 + price_tick1) / 2;
+        }
+        Ok(price_tick)
     }
+    // Returns price of token0 denominated in token1
+    pub fn price(&self, querier: &QuerierWrapper) -> Result<Decimal, DexError> {
 
-    pub fn twap(&self, querier: &QuerierWrapper, env: &Env) -> Option<Decimal> {
-        let start_time = env.block.time;
-        // Invariant: Wont overflow as `env.block.time` is reasonable.
-        let osmosis_start_time = Some(osmosis_std::shim::Timestamp {
-            seconds: start_time.seconds().checked_sub(TWAP_SECONDS).unwrap_or(0).try_into().unwrap(),
-            nanos: 0
-        });
-        let pool = self.to_pool(querier);
-
-        // Invariant: Will only return `None` if `pool` was recently created, as
-        //            we already ensured that `self` is valid during instantiation
-        //            and that the start time is in the near past.
-        let p = TwapQuerier::new(querier)
-            .geometric_twap_to_now(self.0, pool.token0, pool.token1, osmosis_start_time)
-            .ok()?
-            .geometric_twap;
-
-        // Invariant: We know `.geometric_twap_to_now(...)` returns valid `Decimal` values.
-        Some(Decimal::from_str(&p).unwrap())
+        let price_tick = self.current_tick0(querier)?;
+        let price = tick_index_to_price(price_tick);
+        Ok(price)
     }
 }
 
@@ -276,7 +278,7 @@ impl VaultParameters {
 #[readonly::make]
 pub struct VaultInfo {
     #[readonly]
-    pub pool_id: PoolId,
+    pub pair_id: PairId,
     pub admin: Option<Addr>,
     pub rebalancer: VaultRebalancer,
 }
@@ -307,93 +309,39 @@ impl VaultInfo {
         };
 
         Ok(VaultInfo {
-            pool_id,
+            pair_id: pool_id,
             rebalancer,
             admin,
         })
     }
 
-    pub fn demon0(&self, querier: &QuerierWrapper) -> String {
-        self.pool_id.to_pool(querier).token0
+    pub fn demon0(&self) -> String {
+        self.pair_id.0[0].clone()
     }
 
-    pub fn demon1(&self, querier: &QuerierWrapper) -> String {
-        self.pool_id.to_pool(querier).token1
+    pub fn demon1(&self) -> String {
+        self.pair_id.0[1].clone()
     }
 
-    pub fn denoms(&self, querier: &QuerierWrapper) -> (String, String) {
-        (self.demon0(querier), self.demon1(querier))
+    pub fn denoms(&self) -> (String, String) {
+        (self.demon0(), self.demon1())
     }
 
-    pub fn pool(&self, querier: &QuerierWrapper) -> Pool {
-        self.pool_id.to_pool(querier)
-    }
-
-    pub fn current_tick(&self, querier: &QuerierWrapper) -> i32 {
+    pub fn current_tick(&self, querier: &QuerierWrapper) -> i64 {
         // Invariant: Wont panic as max and min possible ticks below 2**31 - 1.
-        self.pool(querier).current_tick.try_into().unwrap()
+        self.pair_id.current_tick0(querier).unwrap()
     }
 
-    pub fn tick_spacing(&self, querier: &QuerierWrapper) -> i32 {
-        // Invariant: Wont panic as max and min possible ticks below 2**31 - 1.
-        self.pool(querier).tick_spacing.try_into().unwrap()
+    /// Min possible tick 
+    pub fn min_valid_tick(&self) -> i64 {
+            -559680
+    }   
+    
+    /// Max possible tick 
+    pub fn max_valid_tick(&self) -> i64 {
+        559680
     }
-
-    /// Min possible tick taking into account the pool tick spacing.
-    pub fn min_valid_tick(&self, querier: &QuerierWrapper) -> i32 {
-        let spacing = self.tick_spacing(querier);
-        // Invarint: Wont overflow because `i64::MIN <<< MIN_TICK`.
-
-        // Invariant: Wont panic.
-        // Proof: Division wont fail, as `spacing` is always positive.
-        //        Additions wont overflow, even for unreasonable tick
-        //        spacings. Multiplication by spacing wont overflow,
-        //        as we just divided by it.
-        MIN_TICK
-            .checked_add(spacing)
-            .and_then(|x| x.checked_add(1))
-            .and_then(|x| x.checked_div(spacing))
-            .and_then(|x| x.checked_mul(spacing))
-            .unwrap()
-    }
-
-    /// Max possible tick taking into account the pool tick spacing.
-    pub fn max_valid_tick(&self, querier: &QuerierWrapper) -> i32 {
-        let spacing = self.tick_spacing(querier);
-        // Invariant: Wont panic, as `spacing` is always positive.
-        MAX_TICK
-            .checked_div(spacing)
-            .and_then(|x| x.checked_mul(spacing))
-            .unwrap()
-    }
-
-    // TODO: Document and lift to `i64`, as those computations could panic
-    //       under unreasonable input values. I dont care for that for now,
-    //       I'll just assume `value` is reasonable for now.
-    pub fn closest_valid_tick(&self, value: i32, querier: &QuerierWrapper) -> i32 {
-        let spacing = self.tick_spacing(querier);
-
-        let lower = value
-            .checked_div(spacing)
-            .and_then(|x| x.checked_mul(spacing))
-            .unwrap();
-
-        let upper = value
-            .checked_div(spacing)
-            .and_then(|x| x.checked_add(1))
-            .and_then(|x| x.checked_mul(spacing))
-            .unwrap();
-
-        let closest = min_by_key(lower, upper, |x| (x.checked_sub(value).unwrap()).abs());
-
-        if closest < MIN_TICK {
-            self.min_valid_tick(querier)
-        } else if closest > MAX_TICK {
-            self.max_valid_tick(querier)
-        } else {
-            closest
-        }
-    }
+    
 }
 
 /// See [`VaultRebalancerInstantiateMsg`].
@@ -445,13 +393,13 @@ pub enum PositionType {
     Limit,
 }
 
-type MaybePositionId = Option<u64>;
+type MaybePositionShares = Option<Vec<Coin>>;
 
 // TODO: The bind can be stricter, as the second field can only change
 //       in one direction.
 #[cw_serde]
 pub struct StateSnapshot {
-    pub last_price: Decimal,
+    pub last_price: PrecDec,
     pub last_timestamp: Timestamp,
 }
 
@@ -462,9 +410,9 @@ pub struct VaultState {
     /// 1. Positions are only created on rebalances.
     /// 2. If any of the vault positions is null, then those should
     ///    be `None`, see [`VaultParameters`].
-    pub full_range_position_id: MaybePositionId,
-    pub base_position_id: MaybePositionId,
-    pub limit_position_id: MaybePositionId,
+    pub full_range_position_shares: MaybePositionShares,
+    pub base_position_shares: MaybePositionShares,
+    pub limit_position_shares: MaybePositionShares,
 
     /// last price and last timestamp since the last rebalance. Optional as it
     /// requires a first rebalance to happen to be set. After that, both will
@@ -473,11 +421,11 @@ pub struct VaultState {
 }
 
 impl VaultState {
-    pub fn from_position_type(&self, position_type: PositionType) -> MaybePositionId {
+    pub fn from_position_type(&self, position_type: PositionType) -> &MaybePositionShares {
         match position_type {
-            PositionType::FullRange => self.full_range_position_id,
-            PositionType::Base => self.base_position_id,
-            PositionType::Limit => self.limit_position_id,
+            PositionType::FullRange => &self.full_range_position_shares,
+            PositionType::Base => &self.base_position_shares,
+            PositionType::Limit => &self.limit_position_shares,
         }
     }
 }
