@@ -4,7 +4,7 @@ use neutron_std::types::cosmos::base::query::v1beta1::PageRequest;
 use neutron_std::types::neutron::dex::{tick_liquidity, DexQuerier, PairId, TickLiquidity, DepositRecord};
 use neutron_std::types::neutron::util::precdec::PrecDec;
 use neutron_std::types::cosmos::base::v1beta1::Coin;
-use cosmwasm_std::{Addr, Decimal, Deps, Env, QuerierWrapper, Timestamp, Uint128};
+use cosmwasm_std::{Addr, Deps, Env, QuerierWrapper, Timestamp, Uint128};
 
 use crate::state::Weight;
 
@@ -17,10 +17,10 @@ pub fn max_price() -> PrecDec {
 
 /// Converts a price to a tick index.
 /// This is used to calculate the tick index for the AMM Deposit.
-pub fn price_to_tick_index(price: PrecDec) -> Result<i64, ContractError> {
+pub fn price_to_tick_index(price: &PrecDec) -> Result<i64, ContractError> {
     // Ensure the price is greater than 0
-    if price.is_zero() || price < PrecDec::zero() {
-        return Err(ContractError::InvalidPrice(price));
+    if price.is_zero() || price < &PrecDec::zero() {
+        return Err(ContractError::InvalidPrice(price.clone()));
     }
 
     // Convert PrecDec to f64
@@ -76,10 +76,10 @@ pub const ONE_ITEM_PAGINATION: PageRequest = PageRequest {
     reverse: false,
 };
 
-pub fn tick_index_to_price(tick_index: i64) -> Decimal {
+pub fn tick_index_to_price(tick_index: i64) -> PrecDec {
     let price_base = PrecDec::from_str("1.0001").unwrap();
-    let price = price_base.pow(tick_index as u32);
-    precdec_to_decimal(price)
+     price_base.pow(tick_index as u32)
+    
 }
 
 // pub fn get_all_user_deposits(env: &Env, querier: &QuerierWrapper) -> Result<Vec<DepositRecord>, ContractError> {

@@ -1,14 +1,16 @@
 use std::str::FromStr;
 
-use cosmwasm_std::{coin, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg, Uint128};
+use cosmwasm_std::{coin, BankMsg, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg, Uint128};
 use cw20_base::{contract::{execute_burn, execute_mint, query_balance, query_token_info}, state::TOKEN_INFO};
 use neutron_std::types::neutron::dex::{DepositOptions, DexQuerier, MsgDeposit, MsgWithdrawalWithShares, QueryAllTickLiquidityResponse};
 
 use crate::{
     constants::{MIN_LIQUIDITY, PROTOCOL, VAULT_CREATION_COST_DENOM}, do_some, duality_helpers::{ONE_ITEM_PAGINATION, get_tick_index_for_liquidity, sort_token_data_and_get_pair_id_str}, error::{AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError}, msg::{CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, WithdrawMsg}, query, state::{
-        FEES_INFO, FUNDS_INFO, FundsInfo, PositionType, ProtocolFee, StateSnapshot, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE, VaultInfo, VaultParameters, VaultRebalancer, VaultState, Weight}, utils::{calc_x0, price_function_inv, raw}};
+        FEES_INFO, FUNDS_INFO, FundsInfo, PositionType, ProtocolFee, StateSnapshot, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE, VaultInfo, VaultParameters, VaultRebalancer, VaultState, Weight}, utils::{calc_x0, raw}};
 use crate::duality_helpers::{calc_shares_proportion, price_to_tick_index};
 use neutron_std::types::cosmos::base::v1beta1::Coin;
+use neutron_std::types::neutron::util::precdec::PrecDec;
+
 
 pub fn deposit(
     DepositMsg {
@@ -180,8 +182,8 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     }
 
     let (balanced_balance0, balanced_balance1) = {
-        let bal0 = Decimal::new(bal0);
-        let bal1 = Decimal::new(bal1);
+        let bal0 = PrecDec::new(bal0.into());
+        let bal1 = PrecDec::new(bal1.into());
 
         // Invariant: Wont overflow.
         // Proof: Let `x = bal0` and `y = bal1`. Let `p = Y/X = price`. For the first unwrap
@@ -217,8 +219,8 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
 
         // We take 0.3% slippage to check if balances have the right proportion.
         let balances_price = balanced_balance1 / balanced_balance0;
-        assert!(balances_price >= price * Decimal::from_str("0.997").unwrap());
-        assert!(balances_price <= price * Decimal::from_str("1.003").unwrap());
+        assert!(balances_price >= price * PrecDec::from_str("0.997").unwrap());
+        assert!(balances_price <= price * PrecDec::from_str("1.003").unwrap());
     }
 
     let (full_range_balance0, full_range_balance1) = {
@@ -242,8 +244,8 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
 
         // We take 0.3% slippage to check if balances have the right proportion.
         let balances_price = full_range_balance1 / full_range_balance0;
-        assert!(balances_price >= price * Decimal::from_str("0.997").unwrap());
-        assert!(balances_price <= price * Decimal::from_str("1.003").unwrap())
+        assert!(balances_price >= price * PrecDec::from_str("0.997").unwrap());
+        assert!(balances_price <= price * PrecDec::from_str("1.003").unwrap())
     }
 
     let (base_range_balance0, base_range_balance1) = if !base_factor.is_one() {
@@ -254,7 +256,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
 
         (base_range_balance0, base_range_balance1)
     } else {
-        (Decimal::zero(), Decimal::zero())
+        (PrecDec::zero(), PrecDec::zero())
     };
 
     if !base_factor.is_one() && !balanced_balance0.is_zero() {
@@ -263,8 +265,8 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
 
     let (limit_balance0, limit_balance1) = {
         // Invariant: Wont overflow because `bal >= balanced_balance`, as we earlier checked.
-        let limit_balance0 = Decimal::new(bal0).checked_sub(balanced_balance0).unwrap();
-        let limit_balance1 = Decimal::new(bal1).checked_sub(balanced_balance1).unwrap();
+        let limit_balance0 = PrecDec::new(bal0.into()).checked_sub(balanced_balance0).unwrap();
+        let limit_balance1 = PrecDec::new(bal1.into()).checked_sub(balanced_balance1).unwrap();
         (limit_balance0, limit_balance1)
     };
 
@@ -298,7 +300,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     if !base_factor.is_one() && !base_range_balance0.is_zero() {
         // Invariant: `base_factor > 1`, thus wont panic.
         let lower_price = price.checked_div(base_factor.0).unwrap();
-        let upper_price = price.checked_mul(base_factor.0).unwrap_or(Decimal::MAX);
+        let upper_price = price.checked_mul(base_factor.0).unwrap_or(PrecDec::MAX);
 
         let lower_tick = price_to_tick_index(&lower_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: lower_price.to_string(), err: err.to_string() })?;
         let upper_tick = price_to_tick_index(&upper_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: upper_price.to_string(), err: err.to_string() })?;
@@ -332,7 +334,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
                 create_position_msg(
                     lower_tick,
                     upper_tick,
-                    Decimal::zero(),
+                    PrecDec::zero(),
                     limit_balance1,
                     deps,
                     &env,
@@ -340,7 +342,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
                 2,
             ))
         } else if limit_balance1.is_zero() {
-            let upper_price = price.checked_mul(limit_factor.0).unwrap_or(Decimal::MAX);
+            let upper_price = price.checked_mul(limit_factor.0).unwrap_or(PrecDec::MAX);
             let upper_tick = price_to_tick_index(&upper_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: upper_price.to_string(), err: err.to_string() })?;
 
             // Invariant: Ticks nor Ticks spacings will never be large enough to
@@ -354,7 +356,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
                     lower_tick,
                     upper_tick,
                     limit_balance0,
-                    Decimal::zero(),
+                    PrecDec::zero(),
                     deps,
                     &env,
                 ),
@@ -462,16 +464,16 @@ fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), Rebalanc
 
                 let upper_bound = last_price
                     .checked_mul(price_factor_before_rebalance.0)
-                    .unwrap_or(Decimal::MAX)
-                    .checked_sub(Decimal::raw(1))
-                    .unwrap_or(Decimal::MIN);
+                    .unwrap_or(PrecDec::MAX)
+                    .checked_sub(PrecDec::raw(1))
+                    .unwrap_or(PrecDec::MIN);
 
                 // Invariant: Wont overflow as price factors are always greater or equal to 1
                 let lower_bound = last_price
                     .checked_div(price_factor_before_rebalance.0)
                     .unwrap()
-                    .checked_add(Decimal::raw(1))
-                    .unwrap_or(Decimal::MAX);
+                    .checked_add(PrecDec::raw(1))
+                    .unwrap_or(PrecDec::MAX);
 
                 if (lower_bound..=upper_bound).contains(&price) {
                     return Err(PriceHasntMovedEnough { 
@@ -481,7 +483,7 @@ fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), Rebalanc
                 }
 
                 let twap_variation = Weight::new("0.01").unwrap().mul_dec(&twap_price);
-                let max_twap = twap_price.checked_add(twap_variation).unwrap_or(Decimal::MAX);
+                let max_twap = twap_price.checked_add(twap_variation).unwrap_or(PrecDec::MAX);
                 // Invariant: Wont underflow as `twap_price*0.01 < twap_price`.
                 let min_twap = twap_price.checked_sub(twap_variation).unwrap();
                 if !(min_twap..=max_twap).contains(&price) {
@@ -517,7 +519,7 @@ pub fn remove_liquidity_msg(
 
     
     if let Some(position_shares) = position_shares {
-        // Invariant: We know any position liquidity is a valid Decimal.
+        // Invariant: We know any position liquidity is a valid PrecDec.
     let shares_to_remove: Vec<Coin> = position_shares.iter()
     .map(|share| calc_shares_proportion(*share, liquidity_proportion))
     .collect();
@@ -538,8 +540,8 @@ Some(MsgWithdrawalWithShares {
 pub fn create_position_msg(
     lower_tick: i64,
     upper_tick: i64,
-    tokens_provided0: Decimal,
-    tokens_provided1: Decimal,
+    tokens_provided0: PrecDec,
+    tokens_provided1: PrecDec,
     deps: Deps,
     env: &Env,
 ) -> Result<MsgDeposit, StdError> {
@@ -672,7 +674,7 @@ pub fn withdraw(
         })
     }
 
-    let total_shares_supply = Decimal::raw(total_shares_supply.into());
+    let total_shares_supply = PrecDec::raw(total_shares_supply.into());
 
     // Invariant: We already verified `total_shares_supply` is not zero,
     //            and we also know that it will always be larger than `shares`,
@@ -680,7 +682,7 @@ pub fn withdraw(
     //            always be smaller than the total supply, the resulting division
     //            will always be a valid Weight.
     let shares_proportion = Weight::try_from(
-        Decimal::raw(shares.into()).checked_div(total_shares_supply).unwrap()
+        PrecDec::raw(shares.into()).checked_div(total_shares_supply).unwrap()
     ).unwrap();
 
     let expected_withdrawn_amount0 = shares_proportion.mul_raw(bal0).atomics();

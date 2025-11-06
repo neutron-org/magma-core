@@ -142,7 +142,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //     use crate::{assert_approx_eq, constants::{MAX_TICK, MIN_LIQUIDITY, MIN_TICK, TWAP_SECONDS, VAULT_CREATION_COST_DENOM}, error::RebalanceError, msg::{DepositMsg, PositionBalancesWithFeesResponse, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg, WithdrawMsg}, state::{PositionType, ProtocolFee, VaultCreationCost}, utils::price_function_inv};
 
 //     use super::*;
-//     use cosmwasm_std::{coin, testing::mock_dependencies, Addr, Api, Coin, Decimal};
+//     use cosmwasm_std::{coin, testing::mock_dependencies, Addr, Api, Coin, PrecDec};
 //     use neutron_std::types::{cosmos::bank::v1beta1::QueryBalanceRequest, cosmwasm::wasm::v1::MsgExecuteContractResponse, osmosis::{
 //         concentratedliquidity::v1beta1::{
 //             CreateConcentratedLiquidityPoolsProposal, MsgCreatePosition, PoolRecord
@@ -159,7 +159,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         deployer: SigningAccount,
 //         user1: SigningAccount,
 //         user2: SigningAccount,
-//         _price: Decimal,
+//         _price: PrecDec,
 //     }
 
 //     impl PoolMockup {
@@ -189,7 +189,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //                         denom0: USDC_DENOM.into(),
 //                         denom1: OSMO_DENOM.into(),
 //                         tick_spacing: 100,
-//                         spread_factor: Decimal::from_str("0.01").unwrap().atomics().into()
+//                         spread_factor: PrecDec::from_str("0.01").unwrap().atomics().into()
 //                     }]
 //                 },
 //                 deployer.address(),
@@ -223,7 +223,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //             assert_eq!(position_res.position_id, 1);
 //             app.increase_time(TWAP_SECONDS);
 
-//             let _price = Decimal::new(osmo_in.into()) / Decimal::new(usdc_in.into());
+//             let _price = PrecDec::new(osmo_in.into()) / PrecDec::new(usdc_in.into());
 
 //             Self {
 //                 pool_id, app, deployer, user1, user2, _price
@@ -500,18 +500,18 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //     #[test]
 //     fn price_function_inv_test() {
 //         let prices = &[
-//             Decimal::from_str("0.099998").unwrap(),
-//             Decimal::from_str("0.099999").unwrap(),
-//             Decimal::from_str("0.94998").unwrap(),
-//             Decimal::from_str("0.94999").unwrap(),
-//             Decimal::from_str("0.99998").unwrap(),
-//             Decimal::from_str("0.99999").unwrap(),
-//             Decimal::from_str("1").unwrap(),
-//             Decimal::from_str("1.0001").unwrap(),
-//             Decimal::from_str("1.0002").unwrap(),
-//             Decimal::from_str("9.9999").unwrap(),
-//             Decimal::from_str("10.001").unwrap(),
-//             Decimal::from_str("10.002").unwrap(),
+//             PrecDec::from_str("0.099998").unwrap(),
+//             PrecDec::from_str("0.099999").unwrap(),
+//             PrecDec::from_str("0.94998").unwrap(),
+//             PrecDec::from_str("0.94999").unwrap(),
+//             PrecDec::from_str("0.99998").unwrap(),
+//             PrecDec::from_str("0.99999").unwrap(),
+//             PrecDec::from_str("1").unwrap(),
+//             PrecDec::from_str("1.0001").unwrap(),
+//             PrecDec::from_str("1.0002").unwrap(),
+//             PrecDec::from_str("9.9999").unwrap(),
+//             PrecDec::from_str("10.001").unwrap(),
+//             PrecDec::from_str("10.002").unwrap(),
 //         ];
 
 //         let ticks = &[
@@ -879,7 +879,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         let pool_mockup = PoolMockup::new(200_000, 100_000);
 //         let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", "0.55"));
 //         assert!(vault_mockup.rebalance(&pool_mockup.deployer).is_err());
-//         assert!(vault_mockup.withdraw(Decimal::one().atomics(), &pool_mockup.deployer).is_err());
+//         assert!(vault_mockup.withdraw(PrecDec::one().atomics(), &pool_mockup.deployer).is_err());
 //         assert!(vault_mockup.withdraw(Uint128::zero(), &pool_mockup.deployer).is_err());
 //     }
 

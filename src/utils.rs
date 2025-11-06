@@ -1,6 +1,7 @@
 use std::str::FromStr;
-use cosmwasm_std::{Decimal, Decimal256, Int128, SignedDecimal256, Uint128};
-use crate::state::{PositiveDecimal, PriceFactor, Weight};
+
+use cosmwasm_std::{PrecDec, Uint128};
+use crate::state::{PriceFactor, Weight};
 
 /// Used to chain anyhow::Result computations without closure boilerplate.
 #[macro_export]
@@ -55,50 +56,8 @@ macro_rules! assert_approx_eq {
     };
 }
 
-
-pub fn raw<T: From<Uint128>>(d: &Decimal) -> T {
+pub fn raw<T: From<Uint128>>(d: &PrecDec) -> T {
     d.atomics().into()
-}
-
-// TODO: Prove downgrade to i32 is safe.
-/// Generalized inverse of Osmosis price function. Thus, it will
-/// map each price to its closest tick.
-pub fn price_function_inv(p: &Decimal) -> i32 {
-    let maybe_neg_pow = |exp: i32| {
-        let ten = SignedDecimal256::from_str("10").unwrap();
-        if exp >= 0 {
-            // Invariant: We just verified that `exp` is unsigned.
-            let exp: u32 = exp.try_into().unwrap();
-            ten.checked_pow(exp).ok()
-        } else {
-            SignedDecimal256::one()
-                .checked_div(ten.checked_pow(exp.unsigned_abs()).ok()?)
-                .ok()
-        }
-    };
-
-    let compute_price_inverse = |p| {
-        let floor_log_p = PositiveDecimal::new(p)?.floorlog10();
-        let x = floor_log_p.checked_mul(9)?.checked_sub(1)?;
-
-        let x = maybe_neg_pow(floor_log_p)?
-            .checked_mul(SignedDecimal256::from_str(&x.to_string()).ok()?)
-            .ok()?
-            .checked_add(SignedDecimal256::from(*p))
-            .ok()?;
-
-        let x = maybe_neg_pow(6i32.checked_sub(floor_log_p)?)?
-            .checked_mul(x)
-            .ok()?;
-
-        let x: Int128 = x.to_int_floor().try_into().ok()?;
-        x.i128().try_into().ok()
-    };
-
-    // Invariant: Wont overflow/underflow under i256.
-    // Proof: I have the proof in a obsidian note, TODO I need to
-    //        properly formalize it in doc or a whitepaper.
-    compute_price_inverse(p).unwrap()
 }
 
 /// # Arguments
@@ -114,8 +73,8 @@ pub fn price_function_inv(p: &Decimal) -> i32 {
 /// its liquidity to be `w*L`, where `L` is the total liquidity
 /// of both, the full range position, and the base one. Read
 /// whitepaper for further clarification (TODO).
-pub fn calc_x0(k: &PriceFactor, w: &Weight, x: Decimal) -> Decimal {
-    if w.is_zero() { return Decimal::zero() }
+pub fn calc_x0(k: &PriceFactor, w: &Weight, x: PrecDec) -> PrecDec {
+    if w.is_zero() { return PrecDec::zero() }
     // Invariant: Wont overflow.
     // Proof: I have the proof in a obsidian note, TODO I need to
     //        properly formalize it in doc or a whitepaper.
@@ -123,15 +82,15 @@ pub fn calc_x0(k: &PriceFactor, w: &Weight, x: Decimal) -> Decimal {
         let sqrt_k = k.0.sqrt();
 
         let numerator = w.mul_dec(&sqrt_k);
-        let numerator = Decimal256::from(numerator)
+        let numerator = PrecDec::from(numerator)
             .checked_mul(x.into())?;
 
         let denominator = sqrt_k
-            .checked_sub(Decimal::one())?
+            .checked_sub(PrecDec::one())?
             .checked_add(w.0)?;
 
         let x0 = numerator.checked_div(denominator.into())?;
-        Decimal::try_from(x0)?
+        PrecDec::try_from(x0)?
     }.unwrap()
 }
 

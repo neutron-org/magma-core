@@ -69,26 +69,6 @@ impl TryFrom<PrecDec> for Weight {
     }
 }
 
-#[cw_serde]
-#[readonly::make]
-pub struct PositiveDecimal(pub PrecDec);
-impl PositiveDecimal {
-    pub fn new(value: &PrecDec) -> Option<Self> {
-        (value != PrecDec::zero()).then_some(Self(*value))
-    }
-
-    pub fn floorlog10(&self) -> i32 {
-        let x: u128 = self.0.atomics().into();
-        // Invariant: `u128::ilog10(u128::MAX)` fits in `i32`.
-        let x: i32 = x.ilog10().try_into().unwrap();
-        // Invariant: `ilog10(1) - 18 = 0 - 18` fits in `i32`.
-        let x = x.checked_sub(18).unwrap();
-        // Invariant: `floor(log10(u128::MAX)) - 18 =  20` and
-        //            `floor(log10(1))         - 18 = -18`
-        assert!((-18..=20).contains(&x));
-        x
-    }
-}
 
 #[cw_serde]
 #[readonly::make]
@@ -138,7 +118,7 @@ impl PairId {
         Ok(price_tick)
     }
     // Returns price of token0 denominated in token1
-    pub fn price(&self, querier: &QuerierWrapper) -> Result<Decimal, DexError> {
+    pub fn price(&self, querier: &QuerierWrapper) -> Result<PrecDec, DexError> {
 
         let price_tick = self.current_tick0(querier)?;
         let price = tick_index_to_price(price_tick);
@@ -148,15 +128,15 @@ impl PairId {
 
 #[cw_serde]
 #[readonly::make]
-pub struct PriceFactor(pub Decimal);
+pub struct PriceFactor(pub PrecDec);
 impl PriceFactor {
     pub fn new(value: &str) -> Option<Self> {
-        let value = Decimal::from_str(value).ok()?;
-        (value >= Decimal::one()).then_some(Self(value))
+        let value = PrecDec::from_str(value).ok()?;
+        (value >= PrecDec::one()).then_some(Self(value))
     }
 
     pub fn is_one(&self) -> bool {
-        self.0 == Decimal::one()
+        self.0 == PrecDec::one()
     }
 }
 
@@ -164,7 +144,7 @@ impl PriceFactor {
 #[readonly::make]
 pub struct ProtocolFee(pub Weight);
 impl ProtocolFee {
-    pub fn max() -> Decimal {
+    pub fn max() -> PrecDec {
         *MAX_PROTOCOL_FEE
     }
 
@@ -210,16 +190,16 @@ impl Default for VaultCreationCost {
 pub struct VaultParameters {
     /// Price factor for the base order. Thus, if the current price is `p`,
     /// then the base position will have range `[p/base_factor, p*base_factor]`.
-    /// if `base_factor == PriceFactor(Decimal::one())`, then the vault wont
+    /// if `base_factor == PriceFactor(PrecDec::one())`, then the vault wont
     /// have a base order.
     pub base_factor: PriceFactor,
     /// Price factor for the limit order. Thus, if the current price is `p`,
     /// then the limit position will have either range `[p/limit_factor, p]` or
-    /// `[p, p*limit_factor]`. If `limit_factor == PriceFactor(Decimal::one())`,
+    /// `[p, p*limit_factor]`. If `limit_factor == PriceFactor(PrecDec::one())`,
     /// then the vault wont have aa limit order, and will just hold remaining
     /// tokens.
     pub limit_factor: PriceFactor,
-    /// Decimal weight, zero if we dont want a full range position.
+    /// PrecDec weight, zero if we dont want a full range position.
     pub full_range_weight: Weight,
 }
 
