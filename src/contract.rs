@@ -1,9 +1,14 @@
 use cosmwasm_std::{
     entry_point, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response,
-    StdResult, Uint128
+    StdResult, Uint128,
 };
-use cw20_base::allowances::{execute_burn_from, execute_decrease_allowance, execute_increase_allowance, execute_send_from, execute_transfer_from};
-use cw20_base::contract::{execute_burn, execute_send, execute_transfer, query_balance, query_token_info};
+use cw20_base::allowances::{
+    execute_burn_from, execute_decrease_allowance, execute_increase_allowance, execute_send_from,
+    execute_transfer_from,
+};
+use cw20_base::contract::{
+    execute_burn, execute_send, execute_transfer, query_balance, query_token_info,
+};
 use cw20_base::state::{MinterData, TokenInfo, TOKEN_INFO};
 use neutron_std::types::neutron::dex::MsgDepositResponse;
 
@@ -23,7 +28,6 @@ pub fn instantiate(
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
-
     let vault_info = VaultInfo::new(msg.vault_info.clone(), deps.as_ref())?;
     let vault_parameters = VaultParameters::new(msg.vault_parameters.clone())?;
     let vault_state = VaultState::default();
@@ -49,26 +53,28 @@ pub fn instantiate(
         FEES_INFO.save(deps.storage, &fees_info)?;
         FUNDS_INFO.save(deps.storage, &funds_info)?;
         TOKEN_INFO.save(deps.storage, &token_info)?;
-    }.unwrap();
+    }
+    .unwrap();
 
     Ok(Response::new())
 }
 
 #[entry_point]
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     use QueryMsg::*;
     match msg {
-        VaultBalances {} => to_json_binary(&query::vault_balances(deps)),
-        PositionBalancesWithFees { position_type } => to_json_binary(
-            &query::position_balances_with_fees(position_type, deps),
-        ),
+        VaultBalances {} => to_json_binary(&query::vault_balances(deps, &env)),
+        PositionBalancesWithFees { position_type } => {
+            to_json_binary(&query::position_balances(position_type, deps, &env))
+        }
         CalcSharesAndUsableAmounts {
             for_amount0,
             for_amount1,
         } => to_json_binary(&query::calc_shares_and_usable_amounts(
             for_amount0,
             for_amount1,
-            deps
+            deps,
+            &env,
         )),
         Balance { address } => to_json_binary(&query_balance(deps, address)?),
         // Invariant: Any state is present after instantiation.
@@ -89,7 +95,7 @@ pub fn execute(
     use ExecuteMsg::*;
 
     if !matches!(msg, Deposit(_)) && !info.funds.is_empty() {
-        return Err(ContractError::NonPayable(format!("{:?}", msg)))
+        return Err(ContractError::NonPayable(format!("{:?}", msg)));
     }
 
     match msg {
@@ -98,20 +104,59 @@ pub fn execute(
         Withdraw(withdraw_msg) => Ok(execute::withdraw(withdraw_msg, deps, env, info)?),
         // WithdrawProtocolFees {} => Ok(execute::withdraw_protocol_fees(deps, info)?),
         WithdrawAdminFees {} => Ok(execute::withdraw_admin_fees(deps, info)?),
-        ChangeVaultInfo(new_vault_info) => Ok(execute::change_vault_info(new_vault_info, deps, info)?),
-        ChangeVaultParameters(new_vault_parameters) => Ok(execute::change_vault_parameters(new_vault_parameters, deps, info)?),
-        ChangeAdminFee { new_admin_fee } => Ok(execute::change_admin_fee(new_admin_fee, deps, info)?),
-        ChangeProtocolFee { new_protocol_fee } => Ok(execute::change_protocol_fee(new_protocol_fee, deps, info)?),
+        ChangeVaultInfo(new_vault_info) => {
+            Ok(execute::change_vault_info(new_vault_info, deps, info)?)
+        }
+        ChangeVaultParameters(new_vault_parameters) => Ok(execute::change_vault_parameters(
+            new_vault_parameters,
+            deps,
+            info,
+        )?),
+        ChangeAdminFee { new_admin_fee } => {
+            Ok(execute::change_admin_fee(new_admin_fee, deps, info)?)
+        }
+        ChangeProtocolFee { new_protocol_fee } => {
+            Ok(execute::change_protocol_fee(new_protocol_fee, deps, info)?)
+        }
 
         // Cw20 Realization.
         Transfer { recipient, amount } => Ok(execute_transfer(deps, env, info, recipient, amount)?),
         Burn { amount } => Ok(execute_burn(deps, env, info, amount)?),
-        Send { contract, amount, msg } => Ok(execute_send(deps, env, info, contract, amount, msg)?),
-        IncreaseAllowance { spender, amount, expires } => Ok(execute_increase_allowance( deps, env, info, spender, amount, expires)?),
-        DecreaseAllowance { spender, amount, expires } => Ok(execute_decrease_allowance( deps, env, info, spender, amount, expires)?),
-        TransferFrom { owner, recipient, amount, } => Ok(execute_transfer_from(deps, env, info, owner, recipient, amount)?),
+        Send {
+            contract,
+            amount,
+            msg,
+        } => Ok(execute_send(deps, env, info, contract, amount, msg)?),
+        IncreaseAllowance {
+            spender,
+            amount,
+            expires,
+        } => Ok(execute_increase_allowance(
+            deps, env, info, spender, amount, expires,
+        )?),
+        DecreaseAllowance {
+            spender,
+            amount,
+            expires,
+        } => Ok(execute_decrease_allowance(
+            deps, env, info, spender, amount, expires,
+        )?),
+        TransferFrom {
+            owner,
+            recipient,
+            amount,
+        } => Ok(execute_transfer_from(
+            deps, env, info, owner, recipient, amount,
+        )?),
         BurnFrom { owner, amount } => Ok(execute_burn_from(deps, env, info, owner, amount)?),
-        SendFrom { owner, contract, amount, msg, } => Ok(execute_send_from( deps, env, info, owner, contract, amount, msg)?),
+        SendFrom {
+            owner,
+            contract,
+            amount,
+            msg,
+        } => Ok(execute_send_from(
+            deps, env, info, owner, contract, amount, msg,
+        )?),
     }
 }
 
@@ -165,7 +210,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //     impl PoolMockup {
 //         fn new(usdc_in: u128, osmo_in: u128) -> Self {
 //             let app = NeutronTestApp::new();
-            
+
 //             let init_coins = &[
 //                 Coin::new(1_000_000_000_000u128, USDC_DENOM),
 //                 Coin::new(1_000_000_000_000u128, OSMO_DENOM),
@@ -496,7 +541,6 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         }
 //     }
 
-
 //     #[test]
 //     fn price_function_inv_test() {
 //         let prices = &[
@@ -525,7 +569,6 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         }
 //     }
 
-
 //     #[test]
 //     fn normal_rebalances() {
 //         let pool_mockup = PoolMockup::new(100_000, 200_000);
@@ -540,7 +583,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         let full_range_position = vault_mockup.position_balances_query(PositionType::FullRange);
 
 //         // \[
-//         //   x_0 = \frac{\sqrt k X w}{\sqrt k - 1 + w} 
+//         //   x_0 = \frac{\sqrt k X w}{\sqrt k - 1 + w}
 //         //       = \frac{\sqrt 2 \cdot 750 \cdot 0.55}{\sqrt 2 - 1 + 0.55 }
 //         //       \approx 605$
 //         // \]
@@ -564,7 +607,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         let pool_balance1 = 200_000;
 //         let pool_mockup = PoolMockup::new(pool_balance0, pool_balance1);
 //         let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", "0.55"));
-        
+
 //         vault_mockup.deposit(pool_balance0/2, pool_balance1/2, &pool_mockup.user1).unwrap();
 //         vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
 //         assert!(vault_mockup.vault_state_query().limit_position_id.is_none());
@@ -614,7 +657,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //     fn full_limit_liquidation() {
 //         let pool_mockup = PoolMockup::new(100_000, 200_000);
 //         let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", "0.55"));
-        
+
 //         vault_mockup.deposit(50_000, 0, &pool_mockup.user1).unwrap();
 //         vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
 //         let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
@@ -630,7 +673,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //     fn full_balanced_liquidation() {
 //         let pool_mockup = PoolMockup::new(100_000, 200_000);
 //         let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", "0.55"));
-        
+
 //         vault_mockup.deposit(10_000, 20_000, &pool_mockup.user1).unwrap();
 //         vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
 //         let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
@@ -646,7 +689,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //     fn full_liquidation() {
 //         let pool_mockup = PoolMockup::new(100_000, 200_000);
 //         let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", "0.55"));
-        
+
 //         vault_mockup.deposit(10_000, 25_000, &pool_mockup.user1).unwrap();
 //         vault_mockup.rebalance(&pool_mockup.deployer).unwrap();
 //         let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
@@ -686,7 +729,6 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         vault_mockup.withdraw(shares_got, &pool_mockup.user1).unwrap();
 //     }
 
-
 //     #[test]
 //     fn withdraw_without_rebalances() {
 //         let (pool_x, pool_y) = (100_000, 200_000);
@@ -707,7 +749,6 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         assert_approx_eq!(vault_bals_after_withdrawal.bal1, Uint128::zero(), MIN_LIQUIDITY + Uint128::one());
 //     }
 
-
 //     #[test]
 //     fn withdraw_limit_without_rebalances() {
 //         let (pool_x, pool_y) = (100_000, 200_000);
@@ -716,7 +757,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 
 //         let (vault_x, vault_y) = (0, 6969);
 //         vault_mockup.deposit(vault_x, vault_y, &pool_mockup.user1).unwrap();
-        
+
 //         assert!(vault_mockup.vault_balances_query().bal0.is_zero());
 //         assert_eq!(vault_mockup.vault_balances_query().bal1, Uint128::new(vault_y));
 
@@ -768,12 +809,11 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //             &pool_mockup.user1
 //         ).unwrap();
 
-
 //         let vault_balances_before_withdrawal = vault_mockup.vault_balances_query();
 //         let shares_got = vault_mockup.shares_query(&pool_mockup.user1.address());
 
 //         let improper_withdrawal = vault_mockup.wasm.execute(
-//             vault_mockup.vault_addr.as_ref(), 
+//             vault_mockup.vault_addr.as_ref(),
 //             &ExecuteMsg::Withdraw(
 //                 WithdrawMsg {
 //                     shares: shares_got,
@@ -788,7 +828,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         assert!(improper_withdrawal.is_err());
 
 //         vault_mockup.wasm.execute(
-//             vault_mockup.vault_addr.as_ref(), 
+//             vault_mockup.vault_addr.as_ref(),
 //             &ExecuteMsg::Withdraw(
 //                 WithdrawMsg {
 //                     shares: shares_got,
@@ -874,7 +914,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         // vault_mockup.protocol_withdraw().unwrap();
 //     }
 
-//     #[test] 
+//     #[test]
 //     fn cant_operate_with_no_funds() {
 //         let pool_mockup = PoolMockup::new(200_000, 100_000);
 //         let vault_mockup = VaultMockup::new(&pool_mockup, vault_params("2", "1.45", "0.55"));
@@ -904,8 +944,8 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 
 //         let should_err = vault_mockup.wasm.execute(
 //             vault_mockup.vault_addr.as_ref(),
-//             &ExecuteMsg::Withdraw(WithdrawMsg { 
-//                 shares, 
+//             &ExecuteMsg::Withdraw(WithdrawMsg {
+//                 shares,
 //                 amount0_min: Uint128::zero(),
 //                 amount1_min: Uint128::zero(),
 //                 to: pool_mockup.user1.address()
@@ -974,7 +1014,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         let shares = vault_mockup.shares_query(&pool_mockup.user1.address());
 //         assert!(shares.is_zero());
 //     }
-    
+
 //     #[test]
 //     fn public_first_rebalancing() {
 //         let pool_mockup = PoolMockup::new(200_000, 100_000);
@@ -982,7 +1022,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         let vault_mockup = VaultMockup::new_with_rebalancer(
 //             &pool_mockup,
 //             vault_params("2", "1.45", "0.55"),
-//             VaultRebalancerInstantiateMsg::Anyone { 
+//             VaultRebalancerInstantiateMsg::Anyone {
 //                 price_factor_before_rebalance: "1".into(), seconds_before_rabalance: 69
 //             }
 //         );
@@ -998,7 +1038,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         let vault_mockup = VaultMockup::new_with_rebalancer(
 //             &pool_mockup,
 //             vault_params("2", "1.45", "0.55"),
-//             VaultRebalancerInstantiateMsg::Anyone { 
+//             VaultRebalancerInstantiateMsg::Anyone {
 //                 price_factor_before_rebalance: "1".into(), seconds_before_rabalance
 //             }
 //         );
@@ -1020,7 +1060,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 //         let vault_mockup = VaultMockup::new_with_rebalancer(
 //             &pool_mockup,
 //             vault_params("2", "1.45", "0.55"),
-//             VaultRebalancerInstantiateMsg::Anyone { 
+//             VaultRebalancerInstantiateMsg::Anyone {
 //                 price_factor_before_rebalance: "1.01".into(), seconds_before_rabalance: 0
 //             }
 //         );

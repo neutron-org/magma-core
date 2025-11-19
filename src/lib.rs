@@ -1,9 +1,9 @@
+pub mod constants;
 pub mod contract;
-pub mod msg;
-pub mod state;
+pub mod duality_helpers;
 pub mod error;
 pub mod execute;
+pub mod msg;
 pub mod query;
+pub mod state;
 pub mod utils;
-pub mod constants;
-pub mod duality_helpers;

@@ -1,16 +1,40 @@
 use std::str::FromStr;
 
-use cosmwasm_std::{coin, BankMsg, Deps, DepsMut, Env, MessageInfo, Response, StdResult, SubMsg, Uint128};
-use cw20_base::{contract::{execute_burn, execute_mint, query_balance, query_token_info}, state::TOKEN_INFO};
-use neutron_std::types::neutron::dex::{DepositOptions, DexQuerier, MsgDeposit, MsgWithdrawalWithShares, QueryAllTickLiquidityResponse};
+use cosmwasm_std::{
+    coin, BankMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, SubMsg,
+    Uint128,
+};
+use cw20_base::{
+    contract::{execute_burn, execute_mint, query_balance, query_token_info},
+    state::TOKEN_INFO,
+};
+use neutron_std::types::neutron::dex::{
+    DepositOptions, DexQuerier, MsgDeposit, QueryAllTickLiquidityResponse,
+};
 
+use crate::duality_helpers::price_to_tick_index;
 use crate::{
-    constants::{MIN_LIQUIDITY, PROTOCOL, VAULT_CREATION_COST_DENOM}, do_some, duality_helpers::{ONE_ITEM_PAGINATION, get_tick_index_for_liquidity, sort_token_data_and_get_pair_id_str}, error::{AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError}, msg::{CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse, VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, WithdrawMsg}, query, state::{
-        FEES_INFO, FUNDS_INFO, FundsInfo, PositionType, ProtocolFee, StateSnapshot, VAULT_INFO, VAULT_PARAMETERS, VAULT_STATE, VaultInfo, VaultParameters, VaultRebalancer, VaultState, Weight}, utils::{calc_x0, raw}};
-use crate::duality_helpers::{calc_shares_proportion, price_to_tick_index};
-use neutron_std::types::cosmos::base::v1beta1::Coin;
+    constants::{MIN_LIQUIDITY, PROTOCOL, VAULT_CREATION_COST_DENOM},
+    duality_helpers::{
+        get_tick_index_for_liquidity, remove_liquidity_msg, sort_token_data_and_get_pair_id_str,
+        ONE_ITEM_PAGINATION,
+    },
+    error::{
+        AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError,
+    },
+    msg::{
+        CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse,
+        VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, WithdrawMsg,
+    },
+    query,
+    state::{
+        FundsInfo, PositionType, ProtocolFee, StateSnapshot, VaultInfo, VaultParameters,
+        VaultRebalancer, VaultState, Weight, FEES_INFO, FUNDS_INFO, VAULT_INFO, VAULT_PARAMETERS,
+        VAULT_STATE,
+    },
+    utils::{calc_x0, precdec_to_uint128},
+};
 use neutron_std::types::neutron::util::precdec::PrecDec;
-
 
 pub fn deposit(
     DepositMsg {
@@ -66,28 +90,30 @@ pub fn deposit(
     }
 
     if !(amount0 > MIN_LIQUIDITY || amount1 > MIN_LIQUIDITY) {
-        return Err(DepositedAmountBelowMinLiquidity { 
+        return Err(DepositedAmountBelowMinLiquidity {
             min_liquidity: MIN_LIQUIDITY.into(),
-            got: format!("({}, {})", amount0, amount1)
-        })
+            got: format!("({}, {})", amount0, amount1),
+        });
     }
 
     let CalcSharesAndUsableAmountsResponse {
         shares,
         usable_amount0: amount0_used,
         usable_amount1: amount1_used,
-    } = query::calc_shares_and_usable_amounts(amount0, amount1, deps.as_ref());
+    } = query::calc_shares_and_usable_amounts(amount0, amount1, deps.as_ref(), &env);
 
     // Invariant: Wont overflow, as for that token balances would have to be above
     //            `Uint128::MAX`, but thats not possible.
     // NOTE: The update is sound as we refund unusued amounts later.
-    FUNDS_INFO.update(deps.storage, |mut funds| -> StdResult<_>  {
-        funds.available_balance0 = funds.available_balance0.checked_add(amount0_used)?;
-        funds.available_balance1 = funds.available_balance1.checked_add(amount1_used)?;
-        Ok(funds)
-    }).unwrap();
+    FUNDS_INFO
+        .update(deps.storage, |mut funds| -> StdResult<_> {
+            funds.available_balance0 = funds.available_balance0.checked_add(amount0_used)?;
+            funds.available_balance1 = funds.available_balance1.checked_add(amount1_used)?;
+            Ok(funds)
+        })
+        .unwrap();
 
-    // Invariant: We already verified the inputed amounts are not zero, 
+    // Invariant: We already verified the inputed amounts are not zero,
     //            thus the resulting shares can never be zero.
     assert!(!shares.is_zero());
 
@@ -113,15 +139,18 @@ pub fn deposit(
                 env.clone(),
                 info.clone(),
                 info.sender.clone().into(),
-                MIN_LIQUIDITY
-            ).unwrap()
-        } else { Response::new() };
+                MIN_LIQUIDITY,
+            )
+            .unwrap()
+        } else {
+            Response::new()
+        };
 
         let user_mint = execute_mint(deps, env, info, new_holder.to_string(), shares).unwrap();
         min_mint.add_attributes(user_mint.attributes)
     };
 
-    // Invariant: Share calculation should will never produce usable amounts 
+    // Invariant: Share calculation should will never produce usable amounts
     //            above actual inputed amounts.
     assert!(amount0_used <= amount0 && amount1_used <= amount1);
 
@@ -130,12 +159,19 @@ pub fn deposit(
         to_address: info.sender.to_string(),
         amount: vec![
             coin(amount0.checked_sub(amount0_used).unwrap().into(), denom0),
-            coin(amount1.checked_sub(amount1_used).unwrap().into(), denom1)
-        ].into_iter().filter(|x| !x.amount.is_zero()).collect()
+            coin(amount1.checked_sub(amount1_used).unwrap().into(), denom1),
+        ]
+        .into_iter()
+        .filter(|x| !x.amount.is_zero())
+        .collect(),
     }))
 }
 
-pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Response, RebalanceError> {
+pub fn rebalance(
+    deps_mut: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, RebalanceError> {
     use RebalanceError::*;
 
     let deps = deps_mut.as_ref();
@@ -145,7 +181,9 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     let mut vault_state = VAULT_STATE.load(deps.storage).unwrap();
 
     let pair_id = vault_info.pair_id.clone();
-    let price = pair_id.price(&deps.querier).map_err(|_| RebalanceError::CannotFetchPrice())?;
+    let price = pair_id
+        .price(&deps.querier)
+        .map_err(|_| RebalanceError::CannotFetchPrice())?;
 
     can_rebalance(deps, env.clone(), info)?;
 
@@ -153,7 +191,7 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
     //       semantical simplicity of the variable.
     vault_state.last_price_and_timestamp = Some(StateSnapshot {
         last_price: price,
-        last_timestamp: env.block.time
+        last_timestamp: env.block.time,
     });
 
     let VaultParameters {
@@ -162,21 +200,21 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         full_range_weight,
     } = VAULT_PARAMETERS.load(deps.storage).unwrap();
 
-    let VaultBalancesResponse { 
+    let VaultBalancesResponse {
         bal0,
         bal1,
         protocol_unclaimed_fees0,
         protocol_unclaimed_fees1,
         admin_unclaimed_fees0,
-        admin_unclaimed_fees1
-    } = query::vault_balances(deps);
+        admin_unclaimed_fees1,
+    } = query::vault_balances(deps, &env);
 
     if bal0.is_zero() && bal1.is_zero() {
         return Err(NothingToRebalance {});
     }
 
     if price.is_zero() {
-        // TODO: If the pool has no price, we should be able to deposit 
+        // TODO: If the pool has no price, we should be able to deposit
         //       in any proportion. But we dont support that for now.
         return Err(PairWithoutPrice(pair_id.pair_id_str()));
     }
@@ -202,7 +240,10 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         }
     };
 
-    assert!(bal0 >= raw(&balanced_balance0) && bal1 >= raw(&balanced_balance1));
+    assert!(
+        bal0 >= precdec_to_uint128(&balanced_balance0)
+            && bal1 >= precdec_to_uint128(&balanced_balance1)
+    );
 
     // Invariant: Balanced positions have both amounts different from zero.
     //            So, if at least one of the in balance amounts are zero,
@@ -265,8 +306,12 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
 
     let (limit_balance0, limit_balance1) = {
         // Invariant: Wont overflow because `bal >= balanced_balance`, as we earlier checked.
-        let limit_balance0 = PrecDec::new(bal0.into()).checked_sub(balanced_balance0).unwrap();
-        let limit_balance1 = PrecDec::new(bal1.into()).checked_sub(balanced_balance1).unwrap();
+        let limit_balance0 = PrecDec::new(bal0.into())
+            .checked_sub(balanced_balance0)
+            .unwrap();
+        let limit_balance1 = PrecDec::new(bal1.into())
+            .checked_sub(balanced_balance1)
+            .unwrap();
         (limit_balance0, limit_balance1)
     };
 
@@ -282,17 +327,17 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         let lower_tick = vault_info.min_valid_tick();
         let upper_tick = vault_info.max_valid_tick();
 
-        new_position_msgs.push(SubMsg::reply_on_success(
-            create_position_msg(
-                lower_tick,
-                upper_tick,
-                full_range_balance0,
-                full_range_balance1,
-                deps,
-                &env,
-            ),
-            0,
-        ))
+        let deposit_msg = create_position_msg(
+            lower_tick,
+            upper_tick,
+            full_range_balance0,
+            full_range_balance1,
+            deps,
+            &env,
+        )
+        .map_err(|err| RebalanceError::DexError(err.to_string()))?;
+
+        new_position_msgs.push(SubMsg::reply_on_success(deposit_msg, 0))
     }
 
     // We just checked that if `base_range_balance0` is not zero, neither
@@ -302,66 +347,79 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         let lower_price = price.checked_div(base_factor.0).unwrap();
         let upper_price = price.checked_mul(base_factor.0).unwrap_or(PrecDec::MAX);
 
-        let lower_tick = price_to_tick_index(&lower_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: lower_price.to_string(), err: err.to_string() })?;
-        let upper_tick = price_to_tick_index(&upper_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: upper_price.to_string(), err: err.to_string() })?;
+        let lower_tick = price_to_tick_index(&lower_price).map_err(|err| {
+            RebalanceError::FailedToConvertPriceToTick {
+                price: lower_price.to_string(),
+                err: err.to_string(),
+            }
+        })?;
+        let upper_tick = price_to_tick_index(&upper_price).map_err(|err| {
+            RebalanceError::FailedToConvertPriceToTick {
+                price: upper_price.to_string(),
+                err: err.to_string(),
+            }
+        })?;
 
-        new_position_msgs.push(SubMsg::reply_on_success(
-            create_position_msg(
-                lower_tick,
-                upper_tick,
-                base_range_balance0,
-                base_range_balance1,
-                deps,
-                &env,
-            ),
-            1,
-        ))
+        let deposit_msg = create_position_msg(
+            lower_tick,
+            upper_tick,
+            base_range_balance0,
+            base_range_balance1,
+            deps,
+            &env,
+        )
+        .map_err(|err| RebalanceError::DexError(err.to_string()))?;
+        new_position_msgs.push(SubMsg::reply_on_success(deposit_msg, 1))
     }
-    
+
     if !limit_factor.is_one() && (!limit_balance0.is_zero() || !limit_balance1.is_zero()) {
         if limit_balance0.is_zero() {
             // Invariant: `limit_factor > 1`, thus wont panic.
             let lower_price = price.checked_div(limit_factor.0).unwrap();
-            let lower_tick = price_to_tick_index(&lower_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: lower_price.to_string(), err: err.to_string() })?;
+            let lower_tick = price_to_tick_index(&lower_price).map_err(|err| {
+                RebalanceError::FailedToConvertPriceToTick {
+                    price: lower_price.to_string(),
+                    err: err.to_string(),
+                }
+            })?;
 
             // Invariant: Ticks nor Ticks spacings will ever be large enough to
             //            overflow out of `i32`.
-            let upper_tick = vault_info
-                .current_tick(&deps.querier);
-                
+            let upper_tick = vault_info.current_tick(&deps.querier);
 
-            new_position_msgs.push(SubMsg::reply_on_success(
-                create_position_msg(
-                    lower_tick,
-                    upper_tick,
-                    PrecDec::zero(),
-                    limit_balance1,
-                    deps,
-                    &env,
-                ),
-                2,
-            ))
+            let deposit_msg = create_position_msg(
+                lower_tick,
+                upper_tick,
+                PrecDec::zero(),
+                limit_balance1,
+                deps,
+                &env,
+            )
+            .map_err(|err| RebalanceError::DexError(err.to_string()))?;
+            new_position_msgs.push(SubMsg::reply_on_success(deposit_msg, 2))
         } else if limit_balance1.is_zero() {
             let upper_price = price.checked_mul(limit_factor.0).unwrap_or(PrecDec::MAX);
-            let upper_tick = price_to_tick_index(&upper_price).map_err(|err| RebalanceError::FailedToConvertPriceToTick { price: upper_price.to_string(), err: err.to_string() })?;
+            let upper_tick = price_to_tick_index(&upper_price).map_err(|err| {
+                RebalanceError::FailedToConvertPriceToTick {
+                    price: upper_price.to_string(),
+                    err: err.to_string(),
+                }
+            })?;
 
             // Invariant: Ticks nor Ticks spacings will never be large enough to
             //            overflow out of `i32`.
-            let lower_tick = vault_info
-                .current_tick(&deps.querier);              
-                
+            let lower_tick = vault_info.current_tick(&deps.querier);
 
-            new_position_msgs.push(SubMsg::reply_on_success(
-                create_position_msg(
-                    lower_tick,
-                    upper_tick,
-                    limit_balance0,
-                    PrecDec::zero(),
-                    deps,
-                    &env,
-                ),
-                2,
-            ))
+            let deposit_msg = create_position_msg(
+                lower_tick,
+                upper_tick,
+                limit_balance0,
+                PrecDec::zero(),
+                deps,
+                &env,
+            )
+            .map_err(|err| RebalanceError::DexError(err.to_string()))?;
+            new_position_msgs.push(SubMsg::reply_on_success(deposit_msg, 2))
         } else {
             // Invariant: Both limit balances cant be non zero, or the resutling position
             //            wouldnt be a limit position.
@@ -373,93 +431,102 @@ pub fn rebalance(deps_mut: DepsMut, env: Env, info: MessageInfo) -> Result<Respo
         remove_liquidity_msg(PositionType::FullRange, deps, &env, &Weight::max()),
         remove_liquidity_msg(PositionType::Base, deps, &env, &Weight::max()),
         remove_liquidity_msg(PositionType::Limit, deps, &env, &Weight::max()),
-    ].into_iter().flatten().collect();
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
     // Invariant: Wont panic as all types are proper.
-    VAULT_STATE.save(deps_mut.storage, &VaultState { 
-        last_price_and_timestamp: vault_state.last_price_and_timestamp,
-        ..VaultState::default()
-    }).unwrap();
+    VAULT_STATE
+        .save(
+            deps_mut.storage,
+            &VaultState {
+                last_price_and_timestamp: vault_state.last_price_and_timestamp,
+                ..VaultState::default()
+            },
+        )
+        .unwrap();
 
-    FUNDS_INFO.update(deps_mut.storage, |_| -> StdResult<_> {
-        Ok(FundsInfo::default())
-    }).unwrap();
+    FUNDS_INFO
+        .update(deps_mut.storage, |_| -> StdResult<_> {
+            Ok(FundsInfo::default())
+        })
+        .unwrap();
 
     // Invariant: Any addition of tokens wont overflow, because for that the token
     //            max supply would have to be above `Uint128::MAX`, but thats impossible.
-    FEES_INFO.update(deps_mut.storage, |mut info| -> StdResult<_> { 
-        info.protocol_tokens0_owned = info.protocol_tokens0_owned
-            .checked_add(protocol_unclaimed_fees0)?;
-        info.protocol_tokens1_owned = info.protocol_tokens1_owned
-            .checked_add(protocol_unclaimed_fees1)?;
-        info.admin_tokens0_owned = info.admin_tokens0_owned
-            .checked_add(admin_unclaimed_fees0)?;
-        info.admin_tokens1_owned = info.admin_tokens1_owned
-            .checked_add(admin_unclaimed_fees1)?;
-        Ok(info)
-    }).unwrap();
-
-    let position_ids = liquidity_removal_msgs
-        .iter()
-        .map(|msg| msg.position_id)
-        .collect();
-
-    let rewards_claim_msg = MsgCollectSpreadRewards {
-        position_ids,
-        sender: env.contract.address.into(),
-    };
+    FEES_INFO
+        .update(deps_mut.storage, |mut info| -> StdResult<_> {
+            info.protocol_tokens0_owned = info
+                .protocol_tokens0_owned
+                .checked_add(protocol_unclaimed_fees0)?;
+            info.protocol_tokens1_owned = info
+                .protocol_tokens1_owned
+                .checked_add(protocol_unclaimed_fees1)?;
+            info.admin_tokens0_owned = info
+                .admin_tokens0_owned
+                .checked_add(admin_unclaimed_fees0)?;
+            info.admin_tokens1_owned = info
+                .admin_tokens1_owned
+                .checked_add(admin_unclaimed_fees1)?;
+            Ok(info)
+        })
+        .unwrap();
 
     Ok(Response::new()
-        .add_message(rewards_claim_msg)
         .add_messages(liquidity_removal_msgs)
-        .add_submessages(new_position_msgs)
-    )
+        .add_submessages(new_position_msgs))
 }
 
 fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), RebalanceError> {
     use RebalanceError::*;
-    
+
     // Invariant: Any state is always present after instantition.
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let vault_state = VAULT_STATE.load(deps.storage).unwrap();
-    let price = vault_info.pair_id.price(&deps.querier);
-    let twap_price = vault_info.pair_id.twap(&deps.querier, &env).ok_or(PoolWasJustCreated())?;
-    
+    let price = vault_info
+        .pair_id
+        .price(&deps.querier)
+        .map_err(|_| CannotFetchPrice())?;
+
     match vault_info.rebalancer {
-        VaultRebalancer::Admin { } => {
+        VaultRebalancer::Admin {} => {
             // Invariant: The rebalancer cant be `Admin` if admin is not present.
             let admin = vault_info.admin.clone().unwrap();
             if admin != info.sender {
-                return Err(UnauthorhizedNonAdminAccount { 
-                    admin: admin.into(), got: info.sender.into() 
-                })
+                return Err(UnauthorhizedNonAdminAccount {
+                    admin: admin.into(),
+                    got: info.sender.into(),
+                });
             }
-        },
+        }
         VaultRebalancer::Delegate { ref rebalancer } => {
             if rebalancer != info.sender {
-                return Err(UnauthorizedDelegateAccount { 
-                    delegate: rebalancer.into(), got: info.sender.into() 
-                })
+                return Err(UnauthorizedDelegateAccount {
+                    delegate: rebalancer.into(),
+                    got: info.sender.into(),
+                });
             }
-        },
-        VaultRebalancer::Anyone { 
+        }
+        VaultRebalancer::Anyone {
             ref price_factor_before_rebalance,
-            time_before_rabalance 
+            time_before_rabalance,
         } => {
             if let Some(StateSnapshot {
                 last_price,
-                last_timestamp
-            }) = vault_state.last_price_and_timestamp {
+                last_timestamp,
+            }) = vault_state.last_price_and_timestamp
+            {
                 let current_time = env.block.time;
                 assert!(current_time.plus_seconds(1) > last_timestamp);
                 if current_time == last_timestamp {
-                    return Err(CantRebalanceTwicePerBlock())
+                    return Err(CantRebalanceTwicePerBlock());
                 }
 
                 let threshold = last_timestamp.plus_seconds(time_before_rabalance.seconds());
                 if threshold > current_time {
                     let time_left = current_time.minus_seconds(threshold.seconds()).seconds();
-                    return Err(NotEnoughTimePassed { time_left })
+                    return Err(NotEnoughTimePassed { time_left });
                 }
 
                 let upper_bound = last_price
@@ -476,25 +543,13 @@ fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), Rebalanc
                     .unwrap_or(PrecDec::MAX);
 
                 if (lower_bound..=upper_bound).contains(&price) {
-                    return Err(PriceHasntMovedEnough { 
+                    return Err(PriceHasntMovedEnough {
                         price: lower_bound.to_string(),
-                        factor: price_factor_before_rebalance.0.to_string() 
-                    })
-                }
-
-                let twap_variation = Weight::new("0.01").unwrap().mul_dec(&twap_price);
-                let max_twap = twap_price.checked_add(twap_variation).unwrap_or(PrecDec::MAX);
-                // Invariant: Wont underflow as `twap_price*0.01 < twap_price`.
-                let min_twap = twap_price.checked_sub(twap_variation).unwrap();
-                if !(min_twap..=max_twap).contains(&price) {
-                    return Err(PriceMovedTooMuchInLastMinute { 
-                        price: price.to_string(),
-                        twap: twap_price.to_string()
-                    })
+                        factor: price_factor_before_rebalance.0.to_string(),
+                    });
                 }
             }
-            
-        },
+        }
     };
     Ok(())
 }
@@ -503,40 +558,6 @@ fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), Rebalanc
 ///
 /// - `None`: If `liquidity_proportion == 0` or `for_position` has no open position.
 /// - `Some(_)`: Otherwise.
-pub fn remove_liquidity_msg(
-    for_position: PositionType,
-    deps: Deps,
-    env: &Env,
-    liquidity_proportion: &Weight,
-) -> Option<MsgWithdrawPosition> {
-    if liquidity_proportion.is_zero() { return None }
-
-    // Invariant: After instantiation, `VAULT_STATE` is always present.
-    let position_shares = VAULT_STATE
-        .load(deps.storage)
-        .unwrap()
-        .from_position_type(for_position);
-
-    
-    if let Some(position_shares) = position_shares {
-        // Invariant: We know any position liquidity is a valid PrecDec.
-    let shares_to_remove: Vec<Coin> = position_shares.iter()
-    .map(|share| calc_shares_proportion(*share, liquidity_proportion))
-    .collect();
-    
-
-Some(MsgWithdrawalWithShares {
-    shares_to_remove,
-    creator: env.contract.address.clone().into(),
-    receiver: env.contract.address.clone().into(),
-})
-    } else {    
-        return None
-    }
-
-    
-}
-
 pub fn create_position_msg(
     lower_tick: i64,
     upper_tick: i64,
@@ -545,7 +566,7 @@ pub fn create_position_msg(
     deps: Deps,
     env: &Env,
 ) -> Result<MsgDeposit, StdError> {
-
+    // TODO: calculate actual deposit amounts
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let [token0, token1] = vault_info.pair_id.0.clone();
 
@@ -564,10 +585,16 @@ pub fn create_position_msg(
     let pair_id_str = sort_token_data_and_get_pair_id_str(&token0, &token1);
     let dex_querier = DexQuerier::new(&deps.querier);
 
-    let liq_token0: QueryAllTickLiquidityResponse =
-        dex_querier.tick_liquidity_all(pair_id_str.clone(), token0.clone(), Some(ONE_ITEM_PAGINATION))?;
-    let liq_token1: QueryAllTickLiquidityResponse =
-        dex_querier.tick_liquidity_all(pair_id_str.clone(), token1.clone(), Some(ONE_ITEM_PAGINATION))?;
+    let liq_token0: QueryAllTickLiquidityResponse = dex_querier.tick_liquidity_all(
+        pair_id_str.clone(),
+        token0.clone(),
+        Some(ONE_ITEM_PAGINATION),
+    )?;
+    let liq_token1: QueryAllTickLiquidityResponse = dex_querier.tick_liquidity_all(
+        pair_id_str.clone(),
+        token1.clone(),
+        Some(ONE_ITEM_PAGINATION),
+    )?;
 
     let min_token0_tick = get_tick_index_for_liquidity(&liq_token0.tick_liquidity[0]) * -1;
     let min_token1_tick = get_tick_index_for_liquidity(&liq_token1.tick_liquidity[0]);
@@ -586,27 +613,62 @@ pub fn create_position_msg(
         fail_tx_on_bel: true,
         swap_on_deposit: true,
         swap_on_deposit_slop_tolerance_bps: 0,
-    
     };
 
+    let n_token0_ticks = if token0_cheaper {
+        middle_tick - fee - lower_tick + 1
+    } else {
+        upper_tick - middle_tick - fee + 1
+    };
+
+    let n_token1_ticks = if !token0_cheaper {
+        middle_tick - fee - lower_tick + 1
+    } else {
+        upper_tick - middle_tick - fee + 1
+    };
+
+    let base = PrecDec::from_str("1.0001").unwrap();
+    // r = 1 / 1.0001
+    let r: PrecDec = PrecDec::one().checked_div(base).unwrap();
+
+    // Number of ticks m = end_tick - start_tick + 1
+
+    // Geometric-series normalization:
+    // sum_{k=0}^{m-1} r^k = (1 - r^m) / (1 - r)
+    let r_to_m_token0 = r.pow(n_token0_ticks as u32);
+    let r_to_m_token1 = r.pow(n_token1_ticks as u32);
+    let geom_sum_token0 = (PrecDec::one().checked_sub(r_to_m_token0).unwrap())
+        / (PrecDec::one().checked_sub(r).unwrap());
+    let geom_sum_token1 = (PrecDec::one().checked_sub(r_to_m_token1).unwrap())
+        / (PrecDec::one().checked_sub(r).unwrap());
+
+    // Each tick i gets:
+    //   x_i = T * r^{i - t_s} * (1 - r) / (1 - r^m)
+    // but we reuse geom_sum = (1 - r^m) / (1 - r)
+    // so norm = 1 / geom_sum = (1 - r) / (1 - r^m)
+    let norm_token0 = PrecDec::one().checked_div(geom_sum_token0).unwrap() / r_to_m_token0;
+    let norm_token1 = PrecDec::one().checked_div(geom_sum_token1).unwrap() / r_to_m_token1;
+
+    let mut r_power_token0 = PrecDec::one();
+    let mut r_power_token1 = PrecDec::one();
     for i in lower_tick..upper_tick {
         if (i - fee <= middle_tick && token0_cheaper) || i + fee >= middle_tick && !token0_cheaper {
-            // TODO: fix this deposit amount
-            deposit_amount0 = Uint128::from_str("10").unwrap();
+            let weight = r_power_token0 * norm_token0;
+            deposit_amount0 = precdec_to_uint128(&weight.checked_mul(tokens_provided0).unwrap());
+            r_power_token0 = r_power_token0.checked_mul(r).unwrap();
         }
 
         if (i - fee <= middle_tick && !token0_cheaper) || i + fee >= middle_tick && token0_cheaper {
-            // TODO: fix me
-            deposit_amount1 = Uint128::from_str("10").unwrap();
+            let weight = r_power_token1 * norm_token1;
+            deposit_amount1 = precdec_to_uint128(&weight.checked_mul(tokens_provided1).unwrap());
+            r_power_token1 = r_power_token1.checked_mul(r).unwrap();
         }
-
-      
 
         deposit_msg.tick_indexes_a_to_b.push(i);
         deposit_msg.amounts_a.push(deposit_amount0.to_string());
         deposit_msg.amounts_b.push(deposit_amount1.to_string());
         deposit_msg.fees.push(fee as u64);
-        deposit_msg.options.push(options);
+        deposit_msg.options.push(options.clone());
     }
 
     Ok(deposit_msg)
@@ -624,7 +686,9 @@ pub fn withdraw(
     info: MessageInfo,
 ) -> Result<Response, WithdrawalError> {
     use WithdrawalError::*;
-    if shares.is_zero() { return Err(ZeroSharesWithdrawal {}) }
+    if shares.is_zero() {
+        return Err(ZeroSharesWithdrawal {});
+    }
 
     let withdrawal_address = deps
         .api
@@ -638,30 +702,36 @@ pub fn withdraw(
     // Invariant: TokenInfo will always be present after instantiation.
     let total_shares_supply = query_token_info(deps.as_ref()).unwrap().total_supply;
 
-    let VaultBalancesResponse { 
+    let VaultBalancesResponse {
         bal0,
         bal1,
         protocol_unclaimed_fees0,
         protocol_unclaimed_fees1,
         admin_unclaimed_fees0,
-        admin_unclaimed_fees1
-    } = query::vault_balances(deps.as_ref());
+        admin_unclaimed_fees1,
+    } = query::vault_balances(deps.as_ref(), &env);
 
     // Invariant: Any addition of tokens wont overflow, because for that the token
     //            max supply would have to be above `Uint128::MAX`, but thats impossible.
-    FEES_INFO.update(deps.storage, |mut info| -> StdResult<_> { 
-        info.protocol_tokens0_owned = info.protocol_tokens0_owned
-            .checked_add(protocol_unclaimed_fees0)?;
-        info.protocol_tokens1_owned = info.protocol_tokens1_owned
-            .checked_add(protocol_unclaimed_fees1)?;
-        info.admin_tokens0_owned = info.admin_tokens0_owned
-            .checked_add(admin_unclaimed_fees0)?;
-        info.admin_tokens1_owned = info.admin_tokens1_owned
-            .checked_add(admin_unclaimed_fees1)?;
-        Ok(info)
-    }).unwrap();
+    FEES_INFO
+        .update(deps.storage, |mut info| -> StdResult<_> {
+            info.protocol_tokens0_owned = info
+                .protocol_tokens0_owned
+                .checked_add(protocol_unclaimed_fees0)?;
+            info.protocol_tokens1_owned = info
+                .protocol_tokens1_owned
+                .checked_add(protocol_unclaimed_fees1)?;
+            info.admin_tokens0_owned = info
+                .admin_tokens0_owned
+                .checked_add(admin_unclaimed_fees0)?;
+            info.admin_tokens1_owned = info
+                .admin_tokens1_owned
+                .checked_add(admin_unclaimed_fees1)?;
+            Ok(info)
+        })
+        .unwrap();
 
-    // Invariant: We know that `info.sender` is a proper address, thus even if it didnt 
+    // Invariant: We know that `info.sender` is a proper address, thus even if it didnt
     //            own any shares, the query would return Uint128::zero().
     let shares_held = query_balance(deps.as_ref(), info.sender.clone().into())
         .unwrap()
@@ -671,10 +741,10 @@ pub fn withdraw(
         return Err(InvalidWithdrawalAmount {
             owned: shares_held.into(),
             withdrawn: shares.into(),
-        })
+        });
     }
 
-    let total_shares_supply = PrecDec::raw(total_shares_supply.into());
+    let total_shares_supply = Decimal::raw(total_shares_supply.into());
 
     // Invariant: We already verified `total_shares_supply` is not zero,
     //            and we also know that it will always be larger than `shares`,
@@ -682,23 +752,37 @@ pub fn withdraw(
     //            always be smaller than the total supply, the resulting division
     //            will always be a valid Weight.
     let shares_proportion = Weight::try_from(
-        PrecDec::raw(shares.into()).checked_div(total_shares_supply).unwrap()
-    ).unwrap();
+        Decimal::raw(shares.into())
+            .checked_div(total_shares_supply)
+            .unwrap(),
+    )
+    .unwrap();
 
-    let expected_withdrawn_amount0 = shares_proportion.mul_raw(bal0).atomics();
-    let expected_withdrawn_amount1 = shares_proportion.mul_raw(bal1).atomics();
+    let expected_withdrawn_amount0 =
+        shares_proportion.mul_raw(bal0).atomics();
+    let expected_withdrawn_amount1 =
+        shares_proportion.mul_raw(bal1).atomics();
 
     // Invariant: Wont underflow as `shares_proportion` is a valid weight.
-    FUNDS_INFO.update(deps.storage, |mut funds| -> StdResult<_> {
-        funds.available_balance0 = funds.available_balance0.checked_sub(
-            shares_proportion.mul_raw(funds.available_balance0).atomics()
-        )?;
+    FUNDS_INFO
+        .update(deps.storage, |mut funds| -> StdResult<_> {
+            funds.available_balance0 = funds.available_balance0.checked_sub(
+                    shares_proportion
+                        .mul_raw(funds.available_balance0)
+                        .atomics(),
+            )?;
 
-        funds.available_balance1 = funds.available_balance1.checked_sub(
-            shares_proportion.mul_raw(funds.available_balance1).atomics()
-        )?;
-        Ok(funds)
-    }).unwrap();
+            funds.available_balance1 = funds.available_balance1.checked_sub(
+                Uint128::try_from(
+                    shares_proportion
+                        .mul_raw(funds.available_balance1)
+                        .atomics(),
+                )
+                .unwrap(),
+            )?;
+            Ok(funds)
+        })
+        .unwrap();
 
     if expected_withdrawn_amount0 < amount0_min || expected_withdrawn_amount1 < amount1_min {
         return Err(WithdrawnAmontsBelowMin {
@@ -725,59 +809,63 @@ pub fn withdraw(
     .collect();
 
     if shares_proportion.is_max() {
-        VAULT_STATE.update(deps.storage, |x| -> StdResult<_> { Ok(VaultState {
-            last_price_and_timestamp: x.last_price_and_timestamp,
-            ..VaultState::default()
-        })}).unwrap();
+        VAULT_STATE
+            .update(deps.storage, |x| -> StdResult<_> {
+                Ok(VaultState {
+                    last_price_and_timestamp: x.last_price_and_timestamp,
+                    ..VaultState::default()
+                })
+            })
+            .unwrap();
     }
 
-    let position_ids = liquidity_removal_msgs
-        .iter()
-        .map(|msg| msg.position_id)
-        .collect();
-
-    let rewards_claim_msg = MsgCollectSpreadRewards {
-        position_ids,
-        sender: env.contract.address.clone().into(),
-    };
-
     // Invariant: `VAULT_INFO` will always be present after instantiation.
-    let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms(&deps.querier);
+    let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms();
 
     // Invariant: We verified earlier that `info.sender` holds at least `shares`.
     let shares_burn_response = execute_burn(deps, env.clone(), info, shares).unwrap();
 
     Ok(shares_burn_response
-        .add_message(rewards_claim_msg)
         .add_messages(liquidity_removal_msgs)
         .add_message(BankMsg::Send {
             to_address: withdrawal_address.into(),
             amount: vec![
                 coin(expected_withdrawn_amount0.into(), denom0),
                 coin(expected_withdrawn_amount1.into(), denom1),
-            ].into_iter().filter(|c| !c.amount.is_zero()).collect()
-        })
-    )
+            ]
+            .into_iter()
+            .filter(|c| !c.amount.is_zero())
+            .collect(),
+        }))
 }
 
-pub fn withdraw_protocol_fees(deps: DepsMut, info: MessageInfo) -> Result<Response, ProtocolOperationError> {
+pub fn withdraw_protocol_fees(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ProtocolOperationError> {
     // Invariant: Any state is always present after instantiation.
     let mut fees = FEES_INFO.load(deps.storage).unwrap();
-    let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms(&deps.querier);
-    
+    let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms();
+
     if *PROTOCOL != info.sender {
         return Err(ProtocolOperationError::UnauthorizedProtocolAccount(
-            "withdraw_protocol_fees".into()
-        ))
+            "withdraw_protocol_fees".into(),
+        ));
     }
 
-    let tx = BankMsg::Send { 
+    let tx = BankMsg::Send {
         to_address: PROTOCOL.to_string(),
         amount: vec![
             coin(fees.protocol_tokens0_owned.into(), denom0),
             coin(fees.protocol_tokens1_owned.into(), denom1),
-            coin(fees.protocol_vault_creation_tokens_owned.into(), VAULT_CREATION_COST_DENOM)
-        ].into_iter().filter(|c| !c.amount.is_zero()).collect() 
+            coin(
+                fees.protocol_vault_creation_tokens_owned.into(),
+                VAULT_CREATION_COST_DENOM,
+            ),
+        ]
+        .into_iter()
+        .filter(|c| !c.amount.is_zero())
+        .collect(),
     };
 
     fees.protocol_tokens0_owned = Uint128::zero();
@@ -789,26 +877,33 @@ pub fn withdraw_protocol_fees(deps: DepsMut, info: MessageInfo) -> Result<Respon
     Ok(Response::new().add_message(tx))
 }
 
-pub fn withdraw_admin_fees(deps: DepsMut, info: MessageInfo) -> Result<Response, AdminOperationError> {
+pub fn withdraw_admin_fees(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, AdminOperationError> {
     use AdminOperationError::*;
     // Invariant: Any state is always present after instantiation.
     let mut fees = FEES_INFO.load(deps.storage).unwrap();
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
-    let (denom0, denom1) = vault_info.denoms(&deps.querier);
+    let (denom0, denom1) = vault_info.denoms();
 
-    let admin = vault_info.admin
+    let admin = vault_info
+        .admin
         .ok_or(NonExistantAdmin("withdraw_admin_fees".into()))?;
 
     if info.sender != admin {
-        return Err(UnauthorizedAdminAccount("withdraw_admin_fees".into()))
+        return Err(UnauthorizedAdminAccount("withdraw_admin_fees".into()));
     }
 
-    let tx = BankMsg::Send { 
-        to_address:  admin.into(),
+    let tx = BankMsg::Send {
+        to_address: admin.into(),
         amount: vec![
             coin(fees.admin_tokens0_owned.into(), denom0),
-            coin(fees.admin_tokens1_owned.into(), denom1)
-        ].into_iter().filter(|c| !c.amount.is_zero()).collect() 
+            coin(fees.admin_tokens1_owned.into(), denom1),
+        ]
+        .into_iter()
+        .filter(|c| !c.amount.is_zero())
+        .collect(),
     };
 
     fees.admin_tokens0_owned = Uint128::zero();
@@ -822,30 +917,34 @@ pub fn withdraw_admin_fees(deps: DepsMut, info: MessageInfo) -> Result<Response,
 pub fn change_vault_info(
     new_vault_info: VaultInfoInstantiateMsg,
     deps: DepsMut,
-    info: MessageInfo
+    info: MessageInfo,
 ) -> Result<Response, AdminOperationError> {
     use AdminOperationError::*;
     // Invariant: Any state is present after instantiation.
     let current_vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let current_token_info = TOKEN_INFO.load(deps.storage).unwrap();
 
-    let admin = current_vault_info.admin.clone()
+    let admin = current_vault_info
+        .admin
+        .clone()
         .ok_or(NonExistantAdmin("change_vault_info".into()))?;
 
     if info.sender != admin {
-        return Err(UnauthorizedAdminAccount("change_vault_info".into()))
+        return Err(UnauthorizedAdminAccount("change_vault_info".into()));
     }
 
-    if new_vault_info.pool_id != current_vault_info.pair_id.0 {
-        return Err(ImmutableReInstantiation("pool_id".into()))
+    if new_vault_info.token_0 != current_vault_info.pair_id.token0()
+        || new_vault_info.token_1 != current_vault_info.pair_id.token0()
+    {
+        return Err(ImmutableReInstantiation("pool_id".into()));
     }
 
     if new_vault_info.vault_name != current_token_info.name {
-        return Err(ImmutableReInstantiation("vault_name".into()))
+        return Err(ImmutableReInstantiation("vault_name".into()));
     }
 
     if new_vault_info.vault_symbol != current_token_info.symbol {
-        return Err(ImmutableReInstantiation("vault_symbol".into()))
+        return Err(ImmutableReInstantiation("vault_symbol".into()));
     }
 
     let new_vault_info = VaultInfo::new(new_vault_info, deps.as_ref())?;
@@ -854,7 +953,7 @@ pub fn change_vault_info(
         // Invariant: Any state is present after instantiation.
         let mut fees_info = FEES_INFO.load(deps.storage).unwrap();
         if !fees_info.admin_tokens0_owned.is_zero() || !fees_info.admin_tokens1_owned.is_zero() {
-            return Err(RemovingAdminWithUncollectedAdminFees())
+            return Err(RemovingAdminWithUncollectedAdminFees());
         }
 
         fees_info.admin_fee = ProtocolFee::zero();
@@ -871,41 +970,47 @@ pub fn change_vault_info(
 pub fn change_vault_parameters(
     new_vault_parameters: VaultParametersInstantiateMsg,
     deps: DepsMut,
-    info: MessageInfo
+    info: MessageInfo,
 ) -> Result<Response, AdminOperationError> {
     use AdminOperationError::*;
     // Invariant: Any state is present after instantiation.
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
 
-    let admin = vault_info.admin.clone()
+    let admin = vault_info
+        .admin
+        .clone()
         .ok_or(NonExistantAdmin("change_vault_parameters".into()))?;
 
     if info.sender != admin {
-        return Err(UnauthorizedAdminAccount("change_vault_parameters".into()))
+        return Err(UnauthorizedAdminAccount("change_vault_parameters".into()));
     }
 
     let new_vault_parameters = VaultParameters::new(new_vault_parameters)?;
     // Invariant: Wont panic as we ensured all types are proper during development.
-    VAULT_PARAMETERS.save(deps.storage, &new_vault_parameters).unwrap();
-    
+    VAULT_PARAMETERS
+        .save(deps.storage, &new_vault_parameters)
+        .unwrap();
+
     Ok(Response::new())
 }
 
 pub fn change_admin_fee(
     new_admin_fee: String,
     deps: DepsMut,
-    info: MessageInfo
+    info: MessageInfo,
 ) -> Result<Response, AdminOperationError> {
     use AdminOperationError::*;
     // Invariant: Any state is present after instantiation.
     let vault_info = VAULT_INFO.load(deps.storage).unwrap();
     let fees_info = FEES_INFO.load(deps.storage).unwrap();
 
-    let admin = vault_info.admin.clone()
+    let admin = vault_info
+        .admin
+        .clone()
         .ok_or(NonExistantAdmin("change_admin_fee".into()))?;
 
     if info.sender != admin {
-        return Err(UnauthorizedAdminAccount("change_admin_fee".into()))
+        return Err(UnauthorizedAdminAccount("change_admin_fee".into()));
     }
 
     let new_fees_info = fees_info.update_admin_fee(new_admin_fee, deps.as_ref())?;
@@ -918,15 +1023,15 @@ pub fn change_admin_fee(
 pub fn change_protocol_fee(
     new_protocol_fee: String,
     deps: DepsMut,
-    info: MessageInfo
+    info: MessageInfo,
 ) -> Result<Response, ProtocolOperationError> {
     // Invariant: Any state is present after instantiation.
     let fees_info = FEES_INFO.load(deps.storage).unwrap();
 
     if *PROTOCOL != info.sender {
         return Err(ProtocolOperationError::UnauthorizedProtocolAccount(
-            "withdraw_protocol_fees".into()
-        ))
+            "withdraw_protocol_fees".into(),
+        ));
     }
 
     let new_fees_info = fees_info.update_protocol_fee(new_protocol_fee)?;
@@ -934,4 +1039,3 @@ pub fn change_protocol_fee(
     FEES_INFO.save(deps.storage, &new_fees_info).unwrap();
     Ok(Response::new())
 }
-

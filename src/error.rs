@@ -1,6 +1,6 @@
-use thiserror::Error;
 use crate::constants::TWAP_SECONDS;
 use neutron_std::types::neutron::util::precdec::PrecDec;
+use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ContractError {
@@ -38,7 +38,11 @@ pub enum ContractError {
 #[derive(Error, Debug, PartialEq)]
 pub enum InstantiationError {
     #[error("Vault creation costs {cost} of token {denom}, got: {got}")]
-    VaultCreationCostNotPaid { cost: String, denom: String, got: String },
+    VaultCreationCostNotPaid {
+        cost: String,
+        denom: String,
+        got: String,
+    },
 
     #[error("Invalid concentrated liquidity pool_id {0}")]
     InvalidPoolId(u64),
@@ -53,7 +57,7 @@ pub enum InstantiationError {
     InvalidAdminFee { max: String, got: String },
 
     #[error("The vault admin cant have any fee if the vault doesnt have any admin")]
-    AdminFeeWithoutAdmin { },
+    AdminFeeWithoutAdmin {},
 
     #[error("Contradiction: {reason}")]
     ContradictoryConfig { reason: String },
@@ -63,6 +67,9 @@ pub enum InstantiationError {
 
     #[error("Weights are String Decimals in the range [0, 1], got: {0}")]
     InvalidWeight(String),
+
+    #[error("Invalid historical oracle contract address: {0}")]
+    InvalidHistoricalOracleContract(String),
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -87,7 +94,7 @@ pub enum DepositError {
     DepositedAmountsBelowMin { used: String, wanted: String },
 
     #[error("Deposit must be above {min_liquidity}, got: {got}")]
-    DepositedAmountBelowMinLiquidity { min_liquidity: String, got: String }
+    DepositedAmountBelowMinLiquidity { min_liquidity: String, got: String },
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -98,10 +105,14 @@ pub enum RebalanceError {
     #[error("Only the delegate address {delegate} can rebalance, tried to do so from {got}")]
     UnauthorizedDelegateAccount { delegate: String, got: String },
 
-    #[error("Rebalancing the same vault twice per block is not supported, wait for the next block")]
+    #[error(
+        "Rebalancing the same vault twice per block is not supported, wait for the next block"
+    )]
     CantRebalanceTwicePerBlock(),
 
-    #[error("Cant rebalance, price hasnt moved enough (price: {price}; movement_factor: {factor})")]
+    #[error(
+        "Cant rebalance, price hasnt moved enough (price: {price}; movement_factor: {factor})"
+    )]
     PriceHasntMovedEnough { price: String, factor: String },
 
     #[error("Cant rebalance, the price {price} moved outside [{twap}*0.99, {twap}*1.01]")]
@@ -124,6 +135,9 @@ pub enum RebalanceError {
 
     #[error("Cannot fetch price")]
     CannotFetchPrice(),
+
+    #[error("Dex error: {0}")]
+    DexError(String),
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -133,7 +147,7 @@ pub enum WithdrawalError {
 
     #[error("Trying to withdraw to improper address {0}")]
     InvalidWithdrawalAddress(String),
-    
+
     #[error("Cant withdraw to itself ({0})")]
     CantWithdrawToContract(String),
 
@@ -141,7 +155,7 @@ pub enum WithdrawalError {
     InvalidWithdrawalAmount { owned: String, withdrawn: String },
 
     #[error("Withdrawn amounts below min wanted amounts: got: {got}, wanted: {wanted}")]
-    WithdrawnAmontsBelowMin { got: String, wanted: String }
+    WithdrawnAmontsBelowMin { got: String, wanted: String },
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -170,7 +184,7 @@ pub enum AdminOperationError {
     ReInstantiation(#[from] InstantiationError),
 
     #[error("Tried to remove admin, but there are still uncollected admin fees")]
-    RemovingAdminWithUncollectedAdminFees()
+    RemovingAdminWithUncollectedAdminFees(),
 }
 
 #[derive(Error, Debug, PartialEq)]

@@ -1,7 +1,8 @@
 use std::str::FromStr;
 
-use cosmwasm_std::{PrecDec, Uint128};
 use crate::state::{PriceFactor, Weight};
+use cosmwasm_std::Uint128;
+use neutron_std::types::neutron::util::precdec::PrecDec;
 
 /// Used to chain anyhow::Result computations without closure boilerplate.
 #[macro_export]
@@ -23,7 +24,7 @@ macro_rules! do_some {
     }
 }
 
-/// Used to build do-notation like blocks with anyhow::Result 
+/// Used to build do-notation like blocks with anyhow::Result
 /// without closure boilerplate.
 #[macro_export]
 macro_rules! do_me {
@@ -39,11 +40,7 @@ macro_rules! do_me {
 #[macro_export]
 macro_rules! assert_approx_eq {
     ($a:expr, $b:expr, $tol:expr) => {
-        let d = if $a > $b {
-            $a - $b
-        } else { 
-            $b - $a 
-        };
+        let d = if $a > $b { $a - $b } else { $b - $a };
 
         if d > $tol {
             panic!(
@@ -51,13 +48,14 @@ macro_rules! assert_approx_eq {
                  (left: `{:?}`, right: `{:?}`, tolerance: `{:?}`)",
                 $a, $b, $tol
             );
-            
         }
     };
 }
 
-pub fn raw<T: From<Uint128>>(d: &PrecDec) -> T {
-    d.atomics().into()
+// TODO: this hides a floor opertation. Should just use Uint256_to_uint128
+pub fn precdec_to_uint128(d: &PrecDec) -> Uint128 {
+    // TODO add check that this does not overflow. It really should though
+    Uint128::from_str(&d.to_uint_floor().to_string()).unwrap()
 }
 
 /// # Arguments
@@ -74,23 +72,25 @@ pub fn raw<T: From<Uint128>>(d: &PrecDec) -> T {
 /// of both, the full range position, and the base one. Read
 /// whitepaper for further clarification (TODO).
 pub fn calc_x0(k: &PriceFactor, w: &Weight, x: PrecDec) -> PrecDec {
-    if w.is_zero() { return PrecDec::zero() }
+    if w.is_zero() {
+        return PrecDec::zero();
+    }
     // Invariant: Wont overflow.
     // Proof: I have the proof in a obsidian note, TODO I need to
     //        properly formalize it in doc or a whitepaper.
     do_me! {
+        let w_precdec = w.to_precdec();
         let sqrt_k = k.0.sqrt();
 
-        let numerator = w.mul_dec(&sqrt_k);
-        let numerator = PrecDec::from(numerator)
-            .checked_mul(x.into())?;
+        let numerator = w_precdec.checked_mul(sqrt_k)?;
+        let numerator = numerator.checked_mul(x)?;
 
         let denominator = sqrt_k
             .checked_sub(PrecDec::one())?
-            .checked_add(w.0)?;
+            .checked_add(w_precdec)?;
 
         let x0 = numerator.checked_div(denominator.into())?;
-        PrecDec::try_from(x0)?
-    }.unwrap()
+        x0
+    }
+    .unwrap()
 }
-

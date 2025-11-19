@@ -1,26 +1,36 @@
 use std::{cmp, str::FromStr};
 
-use cosmwasm_std::{Deps, Uint128, Uint256};
+use cosmwasm_std::{Deps, Env, Uint128, Uint256};
 use cw20_base::state::TOKEN_INFO;
-use osmosis_std::types::osmosis::concentratedliquidity::v1beta1::PositionByIdRequest;
+use neutron_std::types::neutron::{dex::DexQuerier, util::precdec::PrecDec};
 
-use crate::{constants::MIN_LIQUIDITY, do_me, do_ok, msg::{CalcSharesAndUsableAmountsResponse, PositionBalancesWithFeesResponse, VaultBalancesResponse}, state::{FundsInfo, PositionType, FEES_INFO, FUNDS_INFO, VAULT_INFO, VAULT_STATE}};
+use crate::{
+    constants::MIN_LIQUIDITY,
+    do_me, do_ok,
+    duality_helpers::remove_liquidity_msg,
+    msg::{
+        CalcSharesAndUsableAmountsResponse, PositionBalancesWithFeesResponse, VaultBalancesResponse,
+    },
+    state::{FundsInfo, PositionType, Weight, FEES_INFO, FUNDS_INFO},
+};
 
 /// Partition available balances to the vault in 3 sets:
 /// - Balances available for business logic, e.g., for creating new positions.
 /// - Idle protocol fees, not yet claimed nor commited to the state.
 /// - Idle vault admin fees, not yet claimed nor commited to the state.
 ///
-/// For this, query the fees and balances in all current vault positions and 
+/// For this, query the fees and balances in all current vault positions and
 /// funds tracked by [`FUNDS_INFO`] and [`FEES_INFO`].
-pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
-    let full_range_balances = position_balances_with_fees(PositionType::FullRange, deps);
-    let base_balances = position_balances_with_fees(PositionType::Base, deps);
-    let limit_balances = position_balances_with_fees(PositionType::Limit, deps);
+pub fn vault_balances(deps: Deps, env: &Env) -> VaultBalancesResponse {
+    let full_range_balances = position_balances(PositionType::FullRange, deps, env);
+    let base_balances = position_balances(PositionType::Base, deps, env);
+    let limit_balances = position_balances(PositionType::Limit, deps, env);
 
     // Invariant: Any state will always be present after instantiation.
-    let FundsInfo { available_balance0, available_balance1 } = FUNDS_INFO
-        .load(deps.storage).unwrap();
+    let FundsInfo {
+        available_balance0,
+        available_balance1,
+    } = FUNDS_INFO.load(deps.storage).unwrap();
 
     let fees = FEES_INFO.load(deps.storage).unwrap();
 
@@ -30,7 +40,7 @@ pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
     //        addition of token amounts wont overflow, because for that the
     //        token supply of any token would have to be above `Uint128::MAX`.
     //        Products wont overflow, as we know the fees are valid weights.
-    do_me! { 
+    do_me! {
         let total_token0_fees = full_range_balances.bal0_fees
             .checked_add(base_balances.bal0_fees)?
             .checked_add(limit_balances.bal0_fees)?;
@@ -39,7 +49,7 @@ pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
             .checked_add(base_balances.bal1_fees)?
             .checked_add(limit_balances.bal1_fees)?;
 
-        let protocol_unclaimed_fees0 = fees.protocol_fee.0
+        let protocol_unclaimed_fees0: Uint128 = fees.protocol_fee.0
             .mul_raw(total_token0_fees)
             .atomics();
 
@@ -70,8 +80,8 @@ pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
             .checked_add(total_token1_fees)?
             .checked_sub(protocol_unclaimed_fees1)?
             .checked_sub(admin_unclaimed_fees1)?;
-        
-        VaultBalancesResponse { 
+
+        VaultBalancesResponse {
             bal0,
             bal1,
             protocol_unclaimed_fees0,
@@ -79,95 +89,62 @@ pub fn vault_balances(deps: Deps) -> VaultBalancesResponse {
             admin_unclaimed_fees0,
             admin_unclaimed_fees1
         }
-    }.unwrap()
+    }
+    .unwrap()
 }
 
-pub fn position_balances_with_fees(
+pub fn position_balances(
     position_type: PositionType,
     deps: Deps,
+    env: &Env,
 ) -> PositionBalancesWithFeesResponse {
-
-    // Invariant: `VAULT_STATE` will always be present after instantiation.
-    let id = VAULT_STATE.load(deps.storage).unwrap().from_position_type(position_type);
-    let id = match id {
-        None => return PositionBalancesWithFeesResponse::default(),
-        Some(id) => id
-    };
-
+    let withdraw_msg = remove_liquidity_msg(position_type, deps, env, &Weight::MAX);
     // Invariant: We verified `id` is a valid position id the moment
     //            we put it in the state, so the query wont fail.
-    let pos = PositionByIdRequest { position_id: id }
-        .query(&deps.querier)
-        .map(|x| x.position.unwrap())
+    let dex_querier = DexQuerier::new(&deps.querier);
+
+    let pos = dex_querier
+        .simulate_withdrawal_with_shares(withdraw_msg)
+        .unwrap()
+        .resp
         .unwrap();
-
-    // Invariant: If position is valid, both assets will be always present.
-    let asset0 = pos.asset0.unwrap();
-    let asset1 = pos.asset1.unwrap();
-    let rewards = pos.claimable_spread_rewards;
-
-    { 
-        // Invariant: `VAULT_INFO` will always be present after instantiation.
-        let (denom0, denom1) = VAULT_INFO
-            .load(deps.storage)
-            .unwrap()
-            .denoms(&deps.querier);
-        assert!(denom0 == asset0.denom && denom1 == asset1.denom);
-        // Invariant: If `pos` is a valid position, it will always have a `position_id`.
-        assert!(pos.position.unwrap().position_id == id);
-    }
 
     // Invariant: Will never panic, because if the position has amounts
     //            `amount0` and `amount1`, we know theyre valid `Uint128`s.
-    // NOTE: We subtract 1 to prevent dust error during withdrawals, as 
-    //       position withdrawals can leave 1 atomic token behind.
-    let bal0 = Uint128::from_str(&asset0.amount)
+    let bal0 = PrecDec::from_str(&pos.dec_reserve0_withdrawn)
         .unwrap()
-        .checked_sub(Uint128::one())
-        .unwrap_or(Uint128::zero());
+        .to_uint_floor();
 
-    let bal1 = Uint128::from_str(&asset1.amount)
+    let bal1 = PrecDec::from_str(&pos.dec_reserve1_withdrawn)
         .unwrap()
-        .checked_sub(Uint128::one())
-        .unwrap_or(Uint128::zero());
+        .to_uint_floor();
 
-    // Invariant: If `rewards` is present, we know its a `Vec` of valid
-    //            amounts, so the conversion will never fail.
-    let rewards0 = rewards
-        .iter()
-        .find(|x| x.denom == asset0.denom)
-        .map(|x| Uint128::from_str(&x.amount))
-        .unwrap_or(Ok(Uint128::zero()))
-        .unwrap();
-    
-    let rewards1 = rewards
-        .iter()
-        .find(|x| x.denom == asset1.denom)
-        .map(|x| Uint128::from_str(&x.amount))
-        .unwrap_or(Ok(Uint128::zero()))
-        .unwrap();
-
-    PositionBalancesWithFeesResponse { 
-        bal0,
-        bal1,
-        bal0_fees: rewards0,
-        bal1_fees: rewards1
+    PositionBalancesWithFeesResponse {
+        bal0: Uint128::from_str(&bal0.to_string()).unwrap(),
+        bal1: Uint128::from_str(&bal1.to_string()).unwrap(),
+        bal0_fees: Uint128::zero(),
+        bal1_fees: Uint128::zero(),
     }
 }
 
 /// # Arguments
 ///
-/// * `input_amount0` - Amount of token0 for which we want to calculate shares for, 
+/// * `input_amount0` - Amount of token0 for which we want to calculate shares for,
 ///                     not yet in the contract state ([`FUNDS_INFO`]).
 ///
-/// * `input_amount1` - Amount of token1 for which we want to calculate shares for, 
+/// * `input_amount1` - Amount of token1 for which we want to calculate shares for,
 ///                     not yet in the contract state ([`FUNDS_INFO`]).
 pub fn calc_shares_and_usable_amounts(
     input_amount0: Uint128,
     input_amount1: Uint128,
-    deps: Deps
+    deps: Deps,
+    env: &Env,
 ) -> CalcSharesAndUsableAmountsResponse {
-    let VaultBalancesResponse { bal0: total0, bal1: total1, .. } = vault_balances(deps);
+    let VaultBalancesResponse {
+        bal0: total0,
+        bal1: total1,
+        ..
+    } = vault_balances(deps, &env);
 
     // Invariant: `TOKEN_INFO` always present after instantiation.
     let total_supply = TOKEN_INFO.load(deps.storage).unwrap().total_supply;
@@ -177,7 +154,8 @@ pub fn calc_shares_and_usable_amounts(
         // Invariant: Wont overflow. See [`DepositError::DepositedAmountBelowMinLiquidity`].
         CalcSharesAndUsableAmountsResponse {
             shares: cmp::max(input_amount0, input_amount1)
-                .checked_sub(MIN_LIQUIDITY).unwrap(),
+                .checked_sub(MIN_LIQUIDITY)
+                .unwrap(),
             usable_amount0: input_amount0,
             usable_amount1: input_amount1,
         }
@@ -195,10 +173,10 @@ pub fn calc_shares_and_usable_amounts(
         //            by `total1`. The same reasoning applies to
         //            the rest of branches.
         let shares = do_ok!(Uint256::from(input_amount1)
-           .checked_mul(total_supply.into())?
-           .checked_div(total1.into())?
-           .try_into()?
-        ).unwrap();
+            .checked_mul(total_supply.into())?
+            .checked_div(total1.into())?
+            .try_into()?)
+        .unwrap();
 
         CalcSharesAndUsableAmountsResponse {
             shares,
@@ -214,8 +192,8 @@ pub fn calc_shares_and_usable_amounts(
         let shares = do_ok!(Uint256::from(input_amount0)
             .checked_mul(total_supply.into())?
             .checked_div(total0.into())?
-            .try_into()?
-        ).unwrap();
+            .try_into()?)
+        .unwrap();
 
         CalcSharesAndUsableAmountsResponse {
             shares,
@@ -261,6 +239,7 @@ pub fn calc_shares_and_usable_amounts(
                 usable_amount0,
                 usable_amount1,
             }
-        }.unwrap()
+        }
+        .unwrap()
     }
 }

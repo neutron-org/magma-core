@@ -1,67 +1,67 @@
 use crate::constants::{
-    MAX_PROTOCOL_FEE, MAX_TICK, MAX_VAULT_CREATION_COST, TWAP_SECONDS, VAULT_CREATION_COST_DENOM
+    MAX_PROTOCOL_FEE, MAX_VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM
 };
 use crate::error::{DexError, InstantiationError, ProtocolOperationError};
 use crate::{
-    constants::MIN_TICK,
     msg::{VaultInfoInstantiateMsg, VaultParametersInstantiateMsg, VaultRebalancerInstantiateMsg},
 };
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Deps, Env, MessageInfo, QuerierWrapper, Timestamp, Uint128};
+use cosmwasm_std::{Addr, Decimal, Deps, MessageInfo, QuerierWrapper, Timestamp, Uint128};
 use cw_storage_plus::Item;
-// use osmosis_std::types::osmosis::twap::v1beta1::TwapQuerier;
-use osmosis_std::types::osmosis::{
-    concentratedliquidity::v1beta1::Pool, poolmanager::v1beta1::PoolmanagerQuerier,
-};
+
 use neutron_std::types::{neutron::dex::DexQuerier,
 cosmos::base::v1beta1::{Coin},
 neutron::util::precdec::PrecDec
 };
 use readonly;
-use std::{cmp::min_by_key, str::FromStr};
+use std::{str::FromStr};
 use crate::duality_helpers::{ONE_ITEM_PAGINATION, tick_index_to_price, get_tick_index_for_liquidity};
 
 #[cw_serde]
 #[readonly::make]
-pub struct Weight(pub PrecDec);
+pub struct Weight(pub Decimal);
 impl Weight {
-    pub const MAX: PrecDec = PrecDec::one();
+    pub const MAX: Self = Self(Decimal::one());
 
     pub fn new(value: &str) -> Option<Self> {
-        let value = PrecDec::from_str(value).ok()?;
-        (value <= Self::MAX).then_some(Self(value))
+        let value = Decimal::from_str(value).ok()?;
+        (value <= Self::MAX.0).then_some(Self(value))
     }
 
-    pub fn mul_dec(&self, value: &PrecDec) -> PrecDec {
+    pub fn mul_dec(&self, value: &Decimal) -> Decimal {
         // Invariant: A weight product wont ever overflow.
         value.checked_mul(self.0).unwrap()
     }
 
-    pub fn mul_raw(&self, value: Uint128) -> PrecDec {
-        self.mul_dec(&PrecDec::raw(value.into()))
+    pub fn mul_raw(&self, value: Uint128) -> Decimal {
+        self.mul_dec(&Decimal::raw(value.into()))
     }
 
     pub fn zero() -> Self {
-        Self(PrecDec::zero())
+        Self(Decimal::zero())
     }
 
     pub fn max() -> Self {
-        Self(Self::MAX)
+        Self::MAX
     }
 
     pub fn is_zero(&self) -> bool {
-        self.0 == PrecDec::zero()
+        self.0 == Decimal::zero()
     }
 
     pub fn is_max(&self) -> bool {
-        self.0 == Weight::MAX
+        self.0 == Self::MAX.0
+    }
+
+    pub fn to_precdec(&self) -> PrecDec {
+        PrecDec::from_str(&self.0.to_string()).unwrap()
     }
 }
 
-impl TryFrom<PrecDec> for Weight {
+impl TryFrom<Decimal> for Weight {
     type Error = ();
-    fn try_from(value: PrecDec) -> Result<Self, Self::Error> {
-        if value > Self::MAX {
+    fn try_from(value: Decimal) -> Result<Self, Self::Error> {
+        if value > Self::MAX.0 {
             Err(())
         } else {
             Ok(Self(value))
@@ -74,16 +74,17 @@ impl TryFrom<PrecDec> for Weight {
 #[readonly::make]
 pub struct PairId(pub [String; 2]);
 impl PairId {
-    pub fn new(pair_id: [String; 2]) -> Option<Self> {
+    pub fn new(pair_id: [String; 2]) -> Self {
         let mut pair_id_sorted = pair_id.clone();
         pair_id_sorted.sort();
 
-        Some(Self(pair_id_sorted))
+        Self(pair_id_sorted)
     }
 
     pub fn pair_id_str(&self) -> String {
         self.0.join("<>")
     }
+
 
     pub fn current_tick0(&self, querier: &QuerierWrapper) -> Result<i64, DexError> {
         let querier = DexQuerier::new(querier);
@@ -124,6 +125,14 @@ impl PairId {
         let price = tick_index_to_price(price_tick);
         Ok(price)
     }
+
+    pub fn token0(&self) -> String {
+        self.0[0].clone()
+    }
+
+    pub fn token1(&self) -> String {
+        self.0[1].clone()
+    }
 }
 
 #[cw_serde]
@@ -144,7 +153,7 @@ impl PriceFactor {
 #[readonly::make]
 pub struct ProtocolFee(pub Weight);
 impl ProtocolFee {
-    pub fn max() -> PrecDec {
+    pub fn max() -> Decimal {
         *MAX_PROTOCOL_FEE
     }
 
@@ -261,15 +270,15 @@ pub struct VaultInfo {
     pub pair_id: PairId,
     pub admin: Option<Addr>,
     pub rebalancer: VaultRebalancer,
+    pub historical_oracle_contract: Addr,
 }
 
 impl VaultInfo {
     pub fn new(info: VaultInfoInstantiateMsg, deps: Deps) -> Result<Self, InstantiationError> {
         use InstantiationError::*;
-        let pool_id =
-            PoolId::new(info.pool_id, &deps.querier).ok_or(InvalidPoolId(info.pool_id))?;
+        let pair_id =
+            PairId::new([info.token_0, info.token_1]);
 
-        assert!(pool_id.0 == info.pool_id);
 
         let rebalancer = VaultRebalancer::new(info.rebalancer, deps)?;
 
@@ -288,10 +297,14 @@ impl VaultInfo {
             }?
         };
 
+        let historical_oracle_contract = deps.api.addr_validate(&info.historical_oracle_contract)
+        .map_err(|_| InvalidHistoricalOracleContract(info.historical_oracle_contract))?;
+
         Ok(VaultInfo {
-            pair_id: pool_id,
+            pair_id,
             rebalancer,
             admin,
+            historical_oracle_contract,
         })
     }
 
@@ -401,11 +414,11 @@ pub struct VaultState {
 }
 
 impl VaultState {
-    pub fn from_position_type(&self, position_type: PositionType) -> &MaybePositionShares {
+    pub fn from_position_type(&self, position_type: PositionType) -> MaybePositionShares {
         match position_type {
-            PositionType::FullRange => &self.full_range_position_shares,
-            PositionType::Base => &self.base_position_shares,
-            PositionType::Limit => &self.limit_position_shares,
+            PositionType::FullRange => self.full_range_position_shares.clone(),
+            PositionType::Base => self.base_position_shares.clone(),
+            PositionType::Limit => self.limit_position_shares.clone(),
         }
     }
 }
@@ -512,3 +525,5 @@ pub const FEES_INFO: Item<FeesInfo> = Item::new("fees_info");
 /// FUNDS_INFO Refers to the known funds available to the contract,
 /// without counting protocol/admin fees.
 pub const FUNDS_INFO: Item<FundsInfo> = Item::new("funds_info");
+
+

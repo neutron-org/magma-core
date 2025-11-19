@@ -1,15 +1,15 @@
 use std::str::FromStr;
 
-use cosmwasm_std::{Addr, Uint128};
-use neutron_std::types::neutron::util::precdec::PrecDec;
+use cosmwasm_std::{Addr, Decimal, Uint128};
 use once_cell::sync::Lazy;
 
 pub const MIN_TICK: i32 = -529_715;
 pub const MAX_TICK: i32 = 529_715;
 pub const MIN_LIQUIDITY: Uint128 = Uint128::new(1000);
 pub const TWAP_SECONDS: u64 = 60;
-pub static PROTOCOL: Lazy<Addr> = Lazy::new(|| Addr::unchecked("osmo1a8gd76fw6umx652v7cs73vnge2zju8s8hcm86t"));
-pub static MAX_PROTOCOL_FEE: Lazy<PrecDec> = Lazy::new(|| PrecDec::from_str("0.1").unwrap());
+pub static PROTOCOL: Lazy<Addr> =
+    Lazy::new(|| Addr::unchecked("osmo1a8gd76fw6umx652v7cs73vnge2zju8s8hcm86t"));
+pub static MAX_PROTOCOL_FEE: Lazy<Decimal> = Lazy::new(|| Decimal::from_str("0.1").unwrap());
 
 pub const VAULT_CREATION_COST_DENOM: &str = "untrn";
 // NOTE: 20 untrn max vault creation cost. Its only proper as USDC has 6 decimals.

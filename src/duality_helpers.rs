@@ -1,15 +1,14 @@
 use std::str::FromStr;
 
+use cosmwasm_std::{Deps, Env, Uint128};
 use neutron_std::types::cosmos::base::query::v1beta1::PageRequest;
-use neutron_std::types::neutron::dex::{tick_liquidity, DexQuerier, PairId, TickLiquidity, DepositRecord};
-use neutron_std::types::neutron::util::precdec::PrecDec;
 use neutron_std::types::cosmos::base::v1beta1::Coin;
-use cosmwasm_std::{Addr, Deps, Env, QuerierWrapper, Timestamp, Uint128};
+use neutron_std::types::neutron::dex::{tick_liquidity, MsgWithdrawalWithShares, TickLiquidity};
+use neutron_std::types::neutron::util::precdec::PrecDec;
 
-use crate::state::Weight;
+use crate::state::{PositionType, Weight, VAULT_STATE};
 
 use crate::error::ContractError;
-
 
 pub fn max_price() -> PrecDec {
     PrecDec::from_str("2020125331305056766452345").unwrap()
@@ -20,14 +19,13 @@ pub fn max_price() -> PrecDec {
 pub fn price_to_tick_index(price: &PrecDec) -> Result<i64, ContractError> {
     // Ensure the price is greater than 0
     if price.is_zero() || price < &PrecDec::zero() {
-        return Err(ContractError::InvalidPrice(price.clone()));
+        return Err(ContractError::InvalidPrice(*price));
     }
 
     // Convert PrecDec to f64
-    let price_f64 = price
-        .to_string()
-        .parse::<f64>()
-        .map_err(|_| ContractError::ConversionError("Failed to convert price to f64".to_string()))?;
+    let price_f64 = price.to_string().parse::<f64>().map_err(|_| {
+        ContractError::ConversionError("Failed to convert price to f64".to_string())
+    })?;
 
     // Compute the logarithm of the base (1.0001)
     let log_base = 1.0001f64.ln();
@@ -64,7 +62,6 @@ pub fn get_tick_index_for_liquidity(liquidity: &TickLiquidity) -> i64 {
         tick_liquidity::Liquidity::LimitOrderTranche(limit_order) => {
             limit_order.key.as_ref().unwrap().tick_index_taker_to_maker
         }
-        _ => panic!("No liquidity found"),
     }
 }
 
@@ -78,33 +75,47 @@ pub const ONE_ITEM_PAGINATION: PageRequest = PageRequest {
 
 pub fn tick_index_to_price(tick_index: i64) -> PrecDec {
     let price_base = PrecDec::from_str("1.0001").unwrap();
-     price_base.pow(tick_index as u32)
-    
+    price_base.pow(tick_index as u32)
 }
 
-// pub fn get_all_user_deposits(env: &Env, querier: &QuerierWrapper) -> Result<Vec<DepositRecord>, ContractError> {
-//     let querier = DexQuerier::new(querier);
-
-//     // TODO: iterate to query all
-//     let user_deposits = querier.user_deposits_all(
-//         env.contract.address.to_string(),
-//         Some(PageRequest {
-//             key: vec![],
-//             offset: 0,
-//             limit: 1000,
-//             count_total: false,
-//             reverse: false,
-//         }),
-//         false,
-//     );
-
-//     Ok(user_deposits.map_err(|_| ContractError::QueryDepositError)?.deposits)
-// }
-
-pub fn calc_shares_proportion(shares: Coin, liquidity_proportion: &Weight) -> Coin {
+pub fn calc_shares_proportion(shares: &Coin, liquidity_proportion: &Weight) -> Coin {
     let amount = shares.amount.parse::<Uint128>().unwrap();
     Coin {
         amount: liquidity_proportion.mul_raw(amount).to_string(),
         denom: shares.denom.clone(),
+    }
+}
+
+pub fn remove_liquidity_msg(
+    for_position: PositionType,
+    deps: Deps,
+    env: &Env,
+    liquidity_proportion: &Weight,
+) -> Option<MsgWithdrawalWithShares> {
+    if liquidity_proportion.is_zero() {
+        return None;
+    }
+
+    // Invariant: After instantiation, `VAULT_STATE` is always present.
+    let position_shares = VAULT_STATE
+        .load(deps.storage)
+        .unwrap()
+        .from_position_type(for_position);
+
+    if let Some(position_shares) = position_shares {
+        // Invariant: We know any position liquidity is a valid PrecDec.
+        let shares_to_remove: Vec<Coin> = position_shares
+            .clone()
+            .iter()
+            .map(|share| calc_shares_proportion(share, liquidity_proportion))
+            .collect();
+
+        Some(MsgWithdrawalWithShares {
+            shares_to_remove,
+            creator: env.contract.address.clone().into(),
+            receiver: env.contract.address.clone().into(),
+        })
+    } else {
+        None
     }
 }
