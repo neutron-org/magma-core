@@ -3,8 +3,8 @@ use std::str::FromStr;
 use cosmwasm_std::{Addr, Decimal, Uint128};
 use once_cell::sync::Lazy;
 
-pub const MIN_TICK: i32 = -529_715;
-pub const MAX_TICK: i32 = 529_715;
+pub const MIN_TICK: i64 = -529_715;
+pub const MAX_TICK: i64 = 529_715;
 pub const MIN_LIQUIDITY: Uint128 = Uint128::new(1000);
 pub const TWAP_SECONDS: u64 = 60;
 pub static PROTOCOL: Lazy<Addr> =

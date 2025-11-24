@@ -1,5 +1,5 @@
 use crate::constants::{
-    MAX_PROTOCOL_FEE, MAX_VAULT_CREATION_COST, VAULT_CREATION_COST_DENOM
+    MAX_PROTOCOL_FEE, MAX_TICK, MAX_VAULT_CREATION_COST, MIN_TICK, VAULT_CREATION_COST_DENOM
 };
 use crate::error::{DexError, InstantiationError, ProtocolOperationError};
 use crate::{
@@ -210,6 +210,7 @@ pub struct VaultParameters {
     pub limit_factor: PriceFactor,
     /// PrecDec weight, zero if we dont want a full range position.
     pub full_range_weight: Weight,
+    pub max_ticks: i64,
 }
 
 impl VaultParameters {
@@ -259,6 +260,7 @@ impl VaultParameters {
             base_factor,
             limit_factor,
             full_range_weight,
+            max_ticks: params.max_ticks,
         })
     }
 }
@@ -270,7 +272,6 @@ pub struct VaultInfo {
     pub pair_id: PairId,
     pub admin: Option<Addr>,
     pub rebalancer: VaultRebalancer,
-    pub historical_oracle_contract: Addr,
 }
 
 impl VaultInfo {
@@ -297,14 +298,10 @@ impl VaultInfo {
             }?
         };
 
-        let historical_oracle_contract = deps.api.addr_validate(&info.historical_oracle_contract)
-        .map_err(|_| InvalidHistoricalOracleContract(info.historical_oracle_contract))?;
-
         Ok(VaultInfo {
             pair_id,
             rebalancer,
             admin,
-            historical_oracle_contract,
         })
     }
 
@@ -327,12 +324,12 @@ impl VaultInfo {
 
     /// Min possible tick 
     pub fn min_valid_tick(&self) -> i64 {
-            -559680
+        MIN_TICK
     }   
     
     /// Max possible tick 
     pub fn max_valid_tick(&self) -> i64 {
-        559680
+        MAX_TICK
     }
     
 }

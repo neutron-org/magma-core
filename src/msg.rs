@@ -8,6 +8,7 @@ pub struct VaultParametersInstantiateMsg {
     pub base_factor: String,       // See [`PriceFactor`].
     pub limit_factor: String,      // See [`PriceFactor`].
     pub full_range_weight: String, // See [`PriceFactor`].
+    pub max_ticks: i64,
 }
 
 #[cw_serde]
@@ -19,7 +20,6 @@ pub struct VaultInfoInstantiateMsg {
     pub admin: Option<String>,
     pub admin_fee: String, // See [`ProtocolFee`].
     pub rebalancer: VaultRebalancerInstantiateMsg,
-    pub historical_oracle_contract: String,
 }
 
 #[cw_serde]

@@ -68,8 +68,6 @@ pub enum InstantiationError {
     #[error("Weights are String Decimals in the range [0, 1], got: {0}")]
     InvalidWeight(String),
 
-    #[error("Invalid historical oracle contract address: {0}")]
-    InvalidHistoricalOracleContract(String),
 }
 
 #[derive(Error, Debug, PartialEq)]

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::state::{PriceFactor, Weight};
+use crate::{constants::{MAX_TICK, MIN_TICK}, state::{PriceFactor, Weight}};
 use cosmwasm_std::Uint128;
 use neutron_std::types::neutron::util::precdec::PrecDec;
 
@@ -93,4 +93,10 @@ pub fn calc_x0(k: &PriceFactor, w: &Weight, x: PrecDec) -> PrecDec {
         x0
     }
     .unwrap()
+}
+
+pub fn calculate_full_deposit_range(center_tick: i64, max_ticks: i64) -> (i64, i64) {
+    let lower_tick = std::cmp::max(center_tick - max_ticks/2, MIN_TICK);
+    let upper_tick = std::cmp::min(center_tick + max_ticks/2, MAX_TICK);
+    (lower_tick, upper_tick)
 }

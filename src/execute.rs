@@ -198,6 +198,7 @@ pub fn rebalance(
         base_factor,
         limit_factor,
         full_range_weight,
+       max_ticks
     } = VAULT_PARAMETERS.load(deps.storage).unwrap();
 
     let VaultBalancesResponse {
@@ -762,7 +763,6 @@ pub fn withdraw(
         shares_proportion.mul_raw(bal0).atomics();
     let expected_withdrawn_amount1 =
         shares_proportion.mul_raw(bal1).atomics();
-
     // Invariant: Wont underflow as `shares_proportion` is a valid weight.
     FUNDS_INFO
         .update(deps.storage, |mut funds| -> StdResult<_> {
