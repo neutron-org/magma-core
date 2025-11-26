@@ -34,7 +34,7 @@ pub fn price_to_tick_index(price: &PrecDec) -> Result<i64, ContractError> {
     let log_price = price_f64.ln();
 
     // Calculate the tick index using the formula: TickIndex = -log(Price) / log(1.0001)
-    let tick_index = -(log_price / log_base);
+    let tick_index = (log_price / log_base);
 
     // Convert the tick index to i64, rounding to the nearest integer
     Ok(tick_index.round() as i64)
@@ -108,14 +108,41 @@ pub fn remove_liquidity_msg(
             .clone()
             .iter()
             .map(|share| calc_shares_proportion(share, liquidity_proportion))
+            .filter_map(|coin| {
+                // Filter out zero-amount shares as Go validation requires positive amounts
+                // Parse the amount to ensure it's a valid positive number
+                match coin.amount.parse::<Uint128>() {
+                    Ok(amount) if !amount.is_zero() => Some(coin),
+                    _ => None,
+                }
+            })
             .collect();
+
+        // Only create message if there are shares to remove
+        if shares_to_remove.is_empty() {
+            return None;
+        }
+
+        let contract_addr_str = env.contract.address.to_string();
 
         Some(MsgWithdrawalWithShares {
             shares_to_remove,
-            creator: env.contract.address.clone().into(),
-            receiver: env.contract.address.clone().into(),
+            creator: contract_addr_str.clone(),
+            receiver: contract_addr_str,
         })
     } else {
         None
+    }
+}
+
+pub fn calc_bounded_tick_range(lower_tick: i64, upper_tick: i64, max_ticks: i64) -> (i64, i64) {
+    if upper_tick < lower_tick {
+     panic!("upper_tick < lower_tick");
+    }
+    if (upper_tick - lower_tick).abs() <= max_ticks {
+        return (lower_tick, upper_tick);
+    } else {
+        let middle_tick = (upper_tick + lower_tick) / 2;
+        return (middle_tick - max_ticks / 2, middle_tick + max_ticks / 2);   
     }
 }

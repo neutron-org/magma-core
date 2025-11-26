@@ -75,9 +75,6 @@ pub enum ExecuteMsg {
     ChangeAdminFee {
         new_admin_fee: String,
     },
-    ChangeProtocolFee {
-        new_protocol_fee: String,
-    },
 
     // Cw20 Realization.
     Transfer {

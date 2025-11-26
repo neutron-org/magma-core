@@ -108,12 +108,25 @@ impl PairId {
         let price_tick: i64;
 
         if liq_token0.is_err() {
-            price_tick = get_tick_index_for_liquidity(&liq_token1.unwrap().tick_liquidity[0]) * -1;
+            let liq1 = liq_token1.unwrap();
+            if liq1.tick_liquidity.is_empty() {
+                return Err(DexError::CannotFetchPrice());
+            }
+            price_tick = get_tick_index_for_liquidity(&liq1.tick_liquidity[0]) * -1;
         } else if liq_token1.is_err() {
-            price_tick = get_tick_index_for_liquidity(&liq_token0.unwrap().tick_liquidity[0]);
+            let liq0 = liq_token0.unwrap();
+            if liq0.tick_liquidity.is_empty() {
+                return Err(DexError::CannotFetchPrice());
+            }
+            price_tick = get_tick_index_for_liquidity(&liq0.tick_liquidity[0]);
         } else {
-            let price_tick0 = get_tick_index_for_liquidity(&liq_token0.unwrap().tick_liquidity[0]);
-            let price_tick1 = get_tick_index_for_liquidity(&liq_token1.unwrap().tick_liquidity[0]);
+            let liq0 = liq_token0.unwrap();
+            let liq1 = liq_token1.unwrap();
+            if liq0.tick_liquidity.is_empty() || liq1.tick_liquidity.is_empty() {
+                return Err(DexError::CannotFetchPrice());
+            }
+            let price_tick0 = get_tick_index_for_liquidity(&liq0.tick_liquidity[0]);
+            let price_tick1 = get_tick_index_for_liquidity(&liq1.tick_liquidity[0]);
             price_tick = (price_tick0 + price_tick1) / 2;
         }
         Ok(price_tick)

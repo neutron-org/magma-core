@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::{constants::{MAX_TICK, MIN_TICK}, state::{PriceFactor, Weight}};
-use cosmwasm_std::Uint128;
+use cosmwasm_std::{Uint128, Uint256};
 use neutron_std::types::neutron::util::precdec::PrecDec;
 
 /// Used to chain anyhow::Result computations without closure boilerplate.
@@ -53,9 +53,13 @@ macro_rules! assert_approx_eq {
 }
 
 // TODO: this hides a floor opertation. Should just use Uint256_to_uint128
-pub fn precdec_to_uint128(d: &PrecDec) -> Uint128 {
+pub fn uint256_to_uint128(uint256: &Uint256) -> Uint128 {
     // TODO add check that this does not overflow. It really should though
-    Uint128::from_str(&d.to_uint_floor().to_string()).unwrap()
+    if uint256.gt(&Uint128::MAX.into()) {
+        panic!("uint256_to_uint128: uint256 is greater than Uint128::MAX");
+    }
+    let uint_str = uint256.to_string();
+    Uint128::from_str(&uint_str).unwrap()
 }
 
 /// # Arguments
@@ -89,14 +93,12 @@ pub fn calc_x0(k: &PriceFactor, w: &Weight, x: PrecDec) -> PrecDec {
             .checked_sub(PrecDec::one())?
             .checked_add(w_precdec)?;
 
+        if denominator.is_zero() {
+            panic!("calc_x0: denominator is zero");
+        }
+
         let x0 = numerator.checked_div(denominator.into())?;
         x0
     }
     .unwrap()
-}
-
-pub fn calculate_full_deposit_range(center_tick: i64, max_ticks: i64) -> (i64, i64) {
-    let lower_tick = std::cmp::max(center_tick - max_ticks/2, MIN_TICK);
-    let upper_tick = std::cmp::min(center_tick + max_ticks/2, MAX_TICK);
-    (lower_tick, upper_tick)
 }

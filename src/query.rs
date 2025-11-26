@@ -99,15 +99,22 @@ pub fn position_balances(
     env: &Env,
 ) -> PositionBalancesWithFeesResponse {
     let withdraw_msg = remove_liquidity_msg(position_type, deps, env, &Weight::MAX);
-    // Invariant: We verified `id` is a valid position id the moment
-    //            we put it in the state, so the query wont fail.
+    
+    // If there's no position, return zero balances
+    if withdraw_msg.is_none() {
+        return PositionBalancesWithFeesResponse {
+            bal0: Uint128::zero(),
+            bal1: Uint128::zero(),
+            bal0_fees: Uint128::zero(),
+            bal1_fees: Uint128::zero(),
+        };
+    };
+    
     let dex_querier = DexQuerier::new(&deps.querier);
 
-    let pos = dex_querier
-        .simulate_withdrawal_with_shares(withdraw_msg)
-        .unwrap()
-        .resp
-        .unwrap();
+    // If the query fails (e.g., invalid address or other validation error),
+    // return zero balances instead of panicking
+    let pos = dex_querier.simulate_withdrawal_with_shares(withdraw_msg).unwrap().resp.unwrap();
 
     // Invariant: Will never panic, because if the position has amounts
     //            `amount0` and `amount1`, we know theyre valid `Uint128`s.

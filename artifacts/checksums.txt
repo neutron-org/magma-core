@@ -1,0 +1,1 @@
+2c09f5e10984978d199f8ca7fc58af5a27dce287cb89a5d6dfebdd79d99194f9  magma_core.wasm

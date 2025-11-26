@@ -12,15 +12,15 @@ use neutron_std::types::neutron::dex::{
     DepositOptions, DexQuerier, MsgDeposit, QueryAllTickLiquidityResponse,
 };
 
-use crate::duality_helpers::price_to_tick_index;
+use crate::duality_helpers::{calc_bounded_tick_range, price_to_tick_index};
 use crate::{
-    constants::{MIN_LIQUIDITY, PROTOCOL, VAULT_CREATION_COST_DENOM},
+    constants::{MIN_LIQUIDITY},
     duality_helpers::{
         get_tick_index_for_liquidity, remove_liquidity_msg, sort_token_data_and_get_pair_id_str,
         ONE_ITEM_PAGINATION,
     },
     error::{
-        AdminOperationError, DepositError, ProtocolOperationError, RebalanceError, WithdrawalError,
+        AdminOperationError, DepositError, RebalanceError, WithdrawalError,
     },
     msg::{
         CalcSharesAndUsableAmountsResponse, DepositMsg, VaultBalancesResponse,
@@ -32,7 +32,7 @@ use crate::{
         VaultRebalancer, VaultState, Weight, FEES_INFO, FUNDS_INFO, VAULT_INFO, VAULT_PARAMETERS,
         VAULT_STATE,
     },
-    utils::{calc_x0, precdec_to_uint128},
+    utils::{calc_x0, uint256_to_uint128},
 };
 use neutron_std::types::neutron::util::precdec::PrecDec;
 
@@ -221,8 +221,10 @@ pub fn rebalance(
     }
 
     let (balanced_balance0, balanced_balance1) = {
-        let bal0 = PrecDec::new(bal0.into());
-        let bal1 = PrecDec::new(bal1.into());
+        // Interpret the vault balances as integer amounts (decimal_places = 0) before
+        // doing any high precision math, otherwise they end up scaled down by 1e27.
+        let bal0 = PrecDec::from_atomics(bal0, 0).unwrap();
+        let bal1 = PrecDec::from_atomics(bal1, 0).unwrap();
 
         // Invariant: Wont overflow.
         // Proof: Let `x = bal0` and `y = bal1`. Let `p = Y/X = price`. For the first unwrap
@@ -242,8 +244,8 @@ pub fn rebalance(
     };
 
     assert!(
-        bal0 >= precdec_to_uint128(&balanced_balance0)
-            && bal1 >= precdec_to_uint128(&balanced_balance1)
+        bal0 >= uint256_to_uint128(&balanced_balance0.to_uint_floor())
+            && bal1 >= uint256_to_uint128(&balanced_balance1.to_uint_floor())
     );
 
     // Invariant: Balanced positions have both amounts different from zero.
@@ -272,7 +274,6 @@ pub fn rebalance(
         let y0 = x0.checked_mul(price).unwrap();
         (x0, y0)
     };
-
     // Invariant: If any of the balanced balances is not zero, and if the vault
     //            uses full range positions, then both balances for the full
     //            range position shouldnt be zero, or the resulting position
@@ -307,10 +308,10 @@ pub fn rebalance(
 
     let (limit_balance0, limit_balance1) = {
         // Invariant: Wont overflow because `bal >= balanced_balance`, as we earlier checked.
-        let limit_balance0 = PrecDec::new(bal0.into())
+        let limit_balance0 = PrecDec::from_atomics(bal0, 0).unwrap()
             .checked_sub(balanced_balance0)
             .unwrap();
-        let limit_balance1 = PrecDec::new(bal1.into())
+        let limit_balance1 = PrecDec::from_atomics(bal1, 0).unwrap()
             .checked_sub(balanced_balance1)
             .unwrap();
         (limit_balance0, limit_balance1)
@@ -323,10 +324,10 @@ pub fn rebalance(
     // the vault only holds tokens for limit orders for now, or that
     // the vault simply has zero `full_range_weight`.
 
-    //TODO: can't actually support full range
-    if !full_range_weight.is_zero() && !full_range_balance0.is_zero() {
-        let lower_tick = vault_info.min_valid_tick();
-        let upper_tick = vault_info.max_valid_tick();
+    if !full_range_weight.is_zero() && !full_range_balance0.lt(&PrecDec::one()) {
+        let lower_tick_raw = vault_info.min_valid_tick();
+        let upper_tick_raw = vault_info.max_valid_tick();
+        let (lower_tick, upper_tick) = calc_bounded_tick_range(lower_tick_raw, upper_tick_raw, max_ticks);
 
         let deposit_msg = create_position_msg(
             lower_tick,
@@ -343,23 +344,29 @@ pub fn rebalance(
 
     // We just checked that if `base_range_balance0` is not zero, neither
     // `base_range_balance1` will be.
-    if !base_factor.is_one() && !base_range_balance0.is_zero() {
+    if !base_factor.is_one() && !base_range_balance0.lt(&PrecDec::one()) {
         // Invariant: `base_factor > 1`, thus wont panic.
         let lower_price = price.checked_div(base_factor.0).unwrap();
         let upper_price = price.checked_mul(base_factor.0).unwrap_or(PrecDec::MAX);
 
-        let lower_tick = price_to_tick_index(&lower_price).map_err(|err| {
+        let lower_tick_raw = price_to_tick_index(&lower_price).map_err(|err| {
             RebalanceError::FailedToConvertPriceToTick {
                 price: lower_price.to_string(),
                 err: err.to_string(),
             }
         })?;
-        let upper_tick = price_to_tick_index(&upper_price).map_err(|err| {
+        let upper_tick_raw = price_to_tick_index(&upper_price).map_err(|err| {
             RebalanceError::FailedToConvertPriceToTick {
                 price: upper_price.to_string(),
                 err: err.to_string(),
             }
         })?;
+
+        if lower_tick_raw > upper_tick_raw {
+            panic!(" base range bal !=0  lower_tick_raw > upper_tick_raw with price = {}, base_factor = {}", price.to_string(), base_factor.0.to_string());
+        }
+
+        let (lower_tick, upper_tick) = calc_bounded_tick_range(lower_tick_raw, upper_tick_raw, max_ticks);
 
         let deposit_msg = create_position_msg(
             lower_tick,
@@ -373,11 +380,11 @@ pub fn rebalance(
         new_position_msgs.push(SubMsg::reply_on_success(deposit_msg, 1))
     }
 
-    if !limit_factor.is_one() && (!limit_balance0.is_zero() || !limit_balance1.is_zero()) {
-        if limit_balance0.is_zero() {
+    if !limit_factor.is_one() && (!limit_balance0.lt(&PrecDec::one()) || !limit_balance1.lt(&PrecDec::one())) {
+        if limit_balance0.lt(&PrecDec::one()) {
             // Invariant: `limit_factor > 1`, thus wont panic.
             let lower_price = price.checked_div(limit_factor.0).unwrap();
-            let lower_tick = price_to_tick_index(&lower_price).map_err(|err| {
+            let lower_tick_raw = price_to_tick_index(&lower_price).map_err(|err| {
                 RebalanceError::FailedToConvertPriceToTick {
                     price: lower_price.to_string(),
                     err: err.to_string(),
@@ -386,7 +393,11 @@ pub fn rebalance(
 
             // Invariant: Ticks nor Ticks spacings will ever be large enough to
             //            overflow out of `i32`.
-            let upper_tick = vault_info.current_tick(&deps.querier);
+            let upper_tick_raw = vault_info.current_tick(&deps.querier);
+            if lower_tick_raw > upper_tick_raw {
+                panic!(" limit bal0 !=0 lower_tick_raw > upper_tick_raw");
+            }
+            let (lower_tick, upper_tick) = calc_bounded_tick_range(lower_tick_raw, upper_tick_raw, max_ticks);
 
             let deposit_msg = create_position_msg(
                 lower_tick,
@@ -398,9 +409,9 @@ pub fn rebalance(
             )
             .map_err(|err| RebalanceError::DexError(err.to_string()))?;
             new_position_msgs.push(SubMsg::reply_on_success(deposit_msg, 2))
-        } else if limit_balance1.is_zero() {
+        } else if limit_balance1.lt(&PrecDec::one()) {
             let upper_price = price.checked_mul(limit_factor.0).unwrap_or(PrecDec::MAX);
-            let upper_tick = price_to_tick_index(&upper_price).map_err(|err| {
+            let upper_tick_raw = price_to_tick_index(&upper_price).map_err(|err| {
                 RebalanceError::FailedToConvertPriceToTick {
                     price: upper_price.to_string(),
                     err: err.to_string(),
@@ -409,7 +420,11 @@ pub fn rebalance(
 
             // Invariant: Ticks nor Ticks spacings will never be large enough to
             //            overflow out of `i32`.
-            let lower_tick = vault_info.current_tick(&deps.querier);
+            let lower_tick_raw = vault_info.current_tick(&deps.querier);
+            if lower_tick_raw > upper_tick_raw {
+                panic!(" limit bal1 !=0 lower_tick_raw > upper_tick_raw");
+            }
+            let (lower_tick, upper_tick) = calc_bounded_tick_range(lower_tick_raw, upper_tick_raw, max_ticks);
 
             let deposit_msg = create_position_msg(
                 lower_tick,
@@ -424,7 +439,7 @@ pub fn rebalance(
         } else {
             // Invariant: Both limit balances cant be non zero, or the resutling position
             //            wouldnt be a limit position.
-            unreachable!()
+            panic!("Both limit balances cant be non zero, or the resutling position wouldnt be a limit position.");
         }
     }
 
@@ -539,7 +554,7 @@ fn can_rebalance(deps: Deps, env: Env, info: MessageInfo) -> Result<(), Rebalanc
                 // Invariant: Wont overflow as price factors are always greater or equal to 1
                 let lower_bound = last_price
                     .checked_div(price_factor_before_rebalance.0)
-                    .unwrap()
+                    .unwrap_or(PrecDec::MIN)
                     .checked_add(PrecDec::raw(1))
                     .unwrap_or(PrecDec::MAX);
 
@@ -597,15 +612,18 @@ pub fn create_position_msg(
         Some(ONE_ITEM_PAGINATION),
     )?;
 
-    let min_token0_tick = get_tick_index_for_liquidity(&liq_token0.tick_liquidity[0]) * -1;
-    let min_token1_tick = get_tick_index_for_liquidity(&liq_token1.tick_liquidity[0]);
+    if liq_token0.tick_liquidity.is_empty() || liq_token1.tick_liquidity.is_empty() {
+        return Err(StdError::generic_err("No liquidity found for the pair"));
+    }
+
+    let min_token0_tick = get_tick_index_for_liquidity(&liq_token0.tick_liquidity[0]);
+    let min_token1_tick = get_tick_index_for_liquidity(&liq_token1.tick_liquidity[0]); // invert token1 tick index
 
     let middle_tick = (min_token0_tick + min_token1_tick) / 2;
 
     let token0_cheaper = min_token0_tick < min_token1_tick;
 
-    let mut deposit_amount0 = Uint128::zero();
-    let mut deposit_amount1 = Uint128::zero();
+    
 
     let fee = 2;
 
@@ -616,16 +634,17 @@ pub fn create_position_msg(
         swap_on_deposit_slop_tolerance_bps: 0,
     };
 
+    // Ensure max is at least 1 to avoid division by zero; but in reality there will be no deposits on this side
     let n_token0_ticks = if token0_cheaper {
-        middle_tick - fee - lower_tick + 1
+        (middle_tick - fee - lower_tick + 1).max(1)
     } else {
-        upper_tick - middle_tick - fee + 1
+        (upper_tick - middle_tick - fee + 1).max(1)
     };
 
     let n_token1_ticks = if !token0_cheaper {
-        middle_tick - fee - lower_tick + 1
+        (middle_tick - fee - lower_tick + 1).max(1)
     } else {
-        upper_tick - middle_tick - fee + 1
+        (upper_tick - middle_tick - fee + 1).max(1)
     };
 
     let base = PrecDec::from_str("1.0001").unwrap();
@@ -638,40 +657,80 @@ pub fn create_position_msg(
     // sum_{k=0}^{m-1} r^k = (1 - r^m) / (1 - r)
     let r_to_m_token0 = r.pow(n_token0_ticks as u32);
     let r_to_m_token1 = r.pow(n_token1_ticks as u32);
+    
+    
     let geom_sum_token0 = (PrecDec::one().checked_sub(r_to_m_token0).unwrap())
-        / (PrecDec::one().checked_sub(r).unwrap());
+        .checked_div(PrecDec::one().checked_sub(r).unwrap()).unwrap();
     let geom_sum_token1 = (PrecDec::one().checked_sub(r_to_m_token1).unwrap())
-        / (PrecDec::one().checked_sub(r).unwrap());
+        .checked_div(PrecDec::one().checked_sub(r).unwrap()).unwrap();
 
     // Each tick i gets:
     //   x_i = T * r^{i - t_s} * (1 - r) / (1 - r^m)
     // but we reuse geom_sum = (1 - r^m) / (1 - r)
-    // so norm = 1 / geom_sum = (1 - r) / (1 - r^m)
-    let norm_token0 = PrecDec::one().checked_div(geom_sum_token0).unwrap() / r_to_m_token0;
-    let norm_token1 = PrecDec::one().checked_div(geom_sum_token1).unwrap() / r_to_m_token1;
+    // so norm = 1 / geom_sum = (1 - r) / (1 - r^m)'
+    if geom_sum_token0.is_zero() || geom_sum_token1.is_zero() {
+        panic!("geom_sum_token0 or geom_sum_token1 is zero");
+    }
+    let norm_token0 = PrecDec::one().checked_div(geom_sum_token0).unwrap();
+    let norm_token1 = PrecDec::one().checked_div(geom_sum_token1).unwrap();
 
     let mut r_power_token0 = PrecDec::one();
     let mut r_power_token1 = PrecDec::one();
-    for i in lower_tick..upper_tick {
+    let mut amount_remaining0 = tokens_provided0;
+    let mut amount_remaining1 = tokens_provided1;
+
+    if tokens_provided0.lt(&PrecDec::one()) && tokens_provided1.lt(&PrecDec::one()) {
+        panic!("at least 1 deposit amount must be > 1");
+    }
+
+    for i in lower_tick..=upper_tick {
+        let mut deposit_amount0 = Uint128::zero();
+        let mut deposit_amount1 = Uint128::zero(); 
         if (i - fee <= middle_tick && token0_cheaper) || i + fee >= middle_tick && !token0_cheaper {
             let weight = r_power_token0 * norm_token0;
-            deposit_amount0 = precdec_to_uint128(&weight.checked_mul(tokens_provided0).unwrap());
+            deposit_amount0 = uint256_to_uint128(&weight.checked_mul(tokens_provided0).unwrap().to_uint_floor());
             r_power_token0 = r_power_token0.checked_mul(r).unwrap();
+
+            // If only fractional tokens remain, deposit the remaining amount at the current tick
+            if deposit_amount0.is_zero() && !amount_remaining0.is_zero() {
+                deposit_amount0 = uint256_to_uint128(&amount_remaining0.to_uint_floor());
+                
+            }
         }
 
         if (i - fee <= middle_tick && !token0_cheaper) || i + fee >= middle_tick && token0_cheaper {
             let weight = r_power_token1 * norm_token1;
-            deposit_amount1 = precdec_to_uint128(&weight.checked_mul(tokens_provided1).unwrap());
+            deposit_amount1 = uint256_to_uint128(&weight.checked_mul(tokens_provided1).unwrap().to_uint_floor());
             r_power_token1 = r_power_token1.checked_mul(r).unwrap();
+
+            if deposit_amount1.is_zero() && !amount_remaining1.is_zero() {
+                deposit_amount1 = uint256_to_uint128(&amount_remaining1.to_uint_floor());
+            }
         }
 
-        deposit_msg.tick_indexes_a_to_b.push(i);
-        deposit_msg.amounts_a.push(deposit_amount0.to_string());
-        deposit_msg.amounts_b.push(deposit_amount1.to_string());
-        deposit_msg.fees.push(fee as u64);
-        deposit_msg.options.push(options.clone());
+        
+       
+
+        if !deposit_amount0.is_zero() || !deposit_amount1.is_zero() {
+            deposit_msg.tick_indexes_a_to_b.push(i);
+            deposit_msg.amounts_a.push(deposit_amount0.to_string());
+            deposit_msg.amounts_b.push(deposit_amount1.to_string());
+            deposit_msg.fees.push(fee as u64);
+            deposit_msg.options.push(options.clone());
+            
+            amount_remaining0 = amount_remaining0.checked_sub(PrecDec::from_atomics(deposit_amount0, 0).unwrap()).unwrap();
+            amount_remaining1 = amount_remaining1.checked_sub(PrecDec::from_atomics(deposit_amount1, 0).unwrap()).unwrap();
+        }
+
+        if amount_remaining0.le(&PrecDec::one()) && amount_remaining1.le(&PrecDec::one()) {
+            break;
+        }
+         
     }
 
+    if deposit_msg.tick_indexes_a_to_b.is_empty() {
+        panic!("deposit_msg.tick_indexes_a_to_b is empty, lower_tick = {}, upper_tick = {}, middle_tick = {}, token0_cheaper = {}, tokens_provided0 = {}, tokens_provided1 = {}", lower_tick, upper_tick, middle_tick, token0_cheaper, tokens_provided0.to_string(), tokens_provided1.to_string());
+    }
     Ok(deposit_msg)
 }
 
@@ -746,6 +805,10 @@ pub fn withdraw(
     }
 
     let total_shares_supply = Decimal::raw(total_shares_supply.into());
+
+    if total_shares_supply.is_zero() {
+        panic!("total_shares_supply is zero");
+    }
 
     // Invariant: We already verified `total_shares_supply` is not zero,
     //            and we also know that it will always be larger than `shares`,
@@ -839,43 +902,6 @@ pub fn withdraw(
         }))
 }
 
-pub fn withdraw_protocol_fees(
-    deps: DepsMut,
-    info: MessageInfo,
-) -> Result<Response, ProtocolOperationError> {
-    // Invariant: Any state is always present after instantiation.
-    let mut fees = FEES_INFO.load(deps.storage).unwrap();
-    let (denom0, denom1) = VAULT_INFO.load(deps.storage).unwrap().denoms();
-
-    if *PROTOCOL != info.sender {
-        return Err(ProtocolOperationError::UnauthorizedProtocolAccount(
-            "withdraw_protocol_fees".into(),
-        ));
-    }
-
-    let tx = BankMsg::Send {
-        to_address: PROTOCOL.to_string(),
-        amount: vec![
-            coin(fees.protocol_tokens0_owned.into(), denom0),
-            coin(fees.protocol_tokens1_owned.into(), denom1),
-            coin(
-                fees.protocol_vault_creation_tokens_owned.into(),
-                VAULT_CREATION_COST_DENOM,
-            ),
-        ]
-        .into_iter()
-        .filter(|c| !c.amount.is_zero())
-        .collect(),
-    };
-
-    fees.protocol_tokens0_owned = Uint128::zero();
-    fees.protocol_tokens1_owned = Uint128::zero();
-    fees.protocol_vault_creation_tokens_owned = Uint128::zero();
-
-    // Invariant: Will serialize as all types are proper.
-    FEES_INFO.save(deps.storage, &fees).unwrap();
-    Ok(Response::new().add_message(tx))
-}
 
 pub fn withdraw_admin_fees(
     deps: DepsMut,
@@ -1020,22 +1046,3 @@ pub fn change_admin_fee(
     Ok(Response::new())
 }
 
-pub fn change_protocol_fee(
-    new_protocol_fee: String,
-    deps: DepsMut,
-    info: MessageInfo,
-) -> Result<Response, ProtocolOperationError> {
-    // Invariant: Any state is present after instantiation.
-    let fees_info = FEES_INFO.load(deps.storage).unwrap();
-
-    if *PROTOCOL != info.sender {
-        return Err(ProtocolOperationError::UnauthorizedProtocolAccount(
-            "withdraw_protocol_fees".into(),
-        ));
-    }
-
-    let new_fees_info = fees_info.update_protocol_fee(new_protocol_fee)?;
-    // Invariant: Wont panic as we ensured all types are proper during development.
-    FEES_INFO.save(deps.storage, &new_fees_info).unwrap();
-    Ok(Response::new())
-}
