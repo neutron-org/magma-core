@@ -77,7 +77,10 @@ pub enum DepositError {
     DepositedAmountBelowMinLiquidity { min_liquidity: Uint128, got: String },
 
     #[error("The vault current proportion is: {current_vault_proportion}; got: {got}, which produces 0 shares")]
-    IndeterminateProportionDeposit { current_vault_proportion: String, got: String }
+    IndeterminateProportionDeposit { current_vault_proportion: String, got: String },
+
+    #[error("Vault Deposits Have Been Disabled. Please remove all funds.")]
+    DepositsDisabled(),
 }
 
 #[derive(Error, Debug, PartialEq)]
