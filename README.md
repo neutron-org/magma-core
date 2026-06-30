@@ -14,7 +14,7 @@ Funds can be withdrawn manually using the [Osmosis CLI](https://docs.osmosis.zon
 
 
 ## Contracts With Balances
-```[SUI/USDC: osmo1xuhyflj9wwe9mj6l249c49yxgc67vdh9k8jgwrk5pdrlu0gqzlrqnzztl0]
+[SUI/USDC: osmo1xuhyflj9wwe9mj6l249c49yxgc67vdh9k8jgwrk5pdrlu0gqzlrqnzztl0]
 [nBTC/OSMO: osmo1aurr4ycl4m5ka820nc2wy7ak3jxk93l9u6lv2swwp6z70nwr7qes9f55qj]
 [nBTC/SAGA: osmo1ftz50tz276uc965jp7extn6a245lnj0u5vg7d4dnx8pymk756cxsls7lpv]
 [HUAHUA/USDC: osmo1rnakfcglf9qx30v0qhaxwf6naywhfy8au3yvq9s9wv9qzseprahqs5dwj7]
@@ -305,7 +305,7 @@ Funds can be withdrawn manually using the [Osmosis CLI](https://docs.osmosis.zon
 [XRP/USDC: osmo1mcsxjz2ntwr6874ugnm9jwvnql507xx6ckq3jde787c8agkf7gnqtrhxhs]
 [TIA/dTIA: osmo1mljc6663svgeh6xnazjzpjqg30jntwykfa8cpw43j80ht60s3xes03x3ky]
 [stATOM/dATOM: osmo1g3r5l764aeqcfufecdqya2h806ahmy7eu5uummr5wjkh5qvqxy4sftkslz]
-```
+
 
 ## License
 
